@@ -806,7 +806,11 @@ const FeedingEntry: React.FC = () => {
                     <Row gutter={24}>
                       <Col span={12}>
                         <Form.Item name="quality" label="睡眠质量">
-                          <Rate character={({ index }: any) => ['😴', '😌', '😊'][index || 0]} />
+                          <Radio.Group style={{ width: '100%' }}>
+                            <Radio.Button value="poor" style={{ width: '33.33%', textAlign: 'center' }}>😴 差</Radio.Button>
+                            <Radio.Button value="fair" style={{ width: '33.33%', textAlign: 'center' }}>😌 一般</Radio.Button>
+                            <Radio.Button value="good" style={{ width: '33.33%', textAlign: 'center' }}>😊 好</Radio.Button>
+                          </Radio.Group>
                         </Form.Item>
                       </Col>
                       <Col span={12}>
