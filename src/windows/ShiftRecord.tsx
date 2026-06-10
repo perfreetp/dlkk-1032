@@ -1,0 +1,923 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Card, Row, Col, List, Tag, Space, Button, Form, Input, Select,
+  DatePicker, TimePicker, Radio, Modal, Timeline, Empty, message,
+  Avatar, Checkbox, InputNumber, Tooltip, Divider, Statistic,
+  Badge, Popover, App
+} from 'antd';
+import {
+  FileTextOutlined, PlusOutlined, CheckCircleOutlined,
+  ExclamationCircleOutlined, ClockCircleOutlined, DeleteOutlined,
+  EditOutlined, SendOutlined, UserOutlined, WarningOutlined,
+  StarOutlined, SaveOutlined, PrinterOutlined, HistoryOutlined
+} from '@ant-design/icons';
+import dayjs from 'dayjs';
+import { useLiveQuery } from '../hooks/useLiveQuery';
+import { db } from '../db';
+import { Baby, HandoverItem, HandoverItemStatus, ShiftType, ShiftRecord } from '../types';
+import { useAppStore } from '../store/appStore';
+import { formatDateTime, formatDuration, getBabyFeedingStats } from '../utils';
+
+const { Option } = Select;
+const { TextArea } = Input;
+const { RangePicker } = TimePicker;
+
+const SHIFT_OPTIONS: { value: ShiftType; label: string; time: string; icon: string; color: string }[] = [
+  { value: 'morning', label: '白班 (早)', time: '08:00 - 16:00', icon: '☀️', color: '#faad14' },
+  { value: 'afternoon', label: '中班 (午)', time: '16:00 - 24:00', icon: '🌆', color: '#722ed1' },
+  { value: 'night', label: '夜班 (晚)', time: '00:00 - 08:00', icon: '🌙', color: '#1677ff' }
+];
+
+const STATUS_CONFIG: Record<HandoverItemStatus, { color: string; label: string; icon: string }> = {
+  pending: { color: '#faad14', label: '待处理', icon: '⏳' },
+  in_progress: { color: '#1677ff', label: '进行中', icon: '🔄' },
+  completed: { color: '#52c41a', label: '已完成', icon: '✅' },
+  attention: { color: '#ff4d4f', label: '重点关注', icon: '⚠️' }
+};
+
+const ShiftRecordPage: React.FC = () => {
+  const {
+    currentNurse, setCurrentNurse, pendingHandoverItems,
+    addHandoverItem, removeHandoverItem, updateHandoverItem,
+    clearHandoverItems, addNotification, setSelectedBaby, setActiveWindow
+  } = useAppStore();
+  const { modal } = App.useApp();
+
+  const [form] = Form.useForm();
+  const [itemForm] = Form.useForm();
+  const [itemModalOpen, setItemModalOpen] = useState(false);
+  const [editingItem, setEditingItem] = useState<HandoverItem | null>(null);
+  const [selectedShiftType, setSelectedShiftType] = useState<ShiftType>(
+    (() => {
+      const h = dayjs().hour();
+      if (h >= 8 && h < 16) return 'morning';
+      if (h >= 16) return 'afternoon';
+      return 'night';
+    })()
+  );
+  const [oncomingNurse, setOncomingNurse] = useState('');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [activeTab, setActiveTab] = useState<'new' | 'history'>('new');
+
+  const babies = useLiveQuery(
+    () => db.babies.where('status').equals('active').sortBy('roomNumber'),
+    [], []
+  ) as Baby[];
+
+  const historyShifts = useLiveQuery(
+    async () => {
+      const arr = await db.shiftRecords.toArray();
+      arr.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return arr.slice(0, 20);
+    },
+    [], []
+  ) as ShiftRecord[];
+
+  useEffect(() => {
+    form.setFieldsValue({
+      shiftType: selectedShiftType,
+      shiftDate: dayjs(),
+      outgoingNurse: currentNurse,
+      startTime: dayjs()
+    });
+    autoGenerateHandoverItems();
+  }, []);
+
+  const autoGenerateHandoverItems = async () => {
+    if (pendingHandoverItems.length > 0) return;
+
+    for (const b of babies) {
+      if (!b.id) continue;
+
+      if (b.allergies) {
+        addHandoverItem({
+          id: `auto_allergy_${b.id}`,
+          babyId: b.id!,
+          description: `⚠️ 过敏史: ${b.allergies}`,
+          status: 'attention',
+          priority: 'high'
+        });
+      }
+
+      if (b.notes) {
+        addHandoverItem({
+          id: `auto_note_${b.id}`,
+          babyId: b.id!,
+          description: `📋 ${b.notes}`,
+          status: 'pending',
+          priority: 'medium'
+        });
+      }
+
+      const stats = await getBabyFeedingStats(b.id!, new Date().toISOString().split('T')[0]);
+      if (stats.minutesSinceLast && stats.avgInterval && stats.minutesSinceLast > stats.avgInterval + 30) {
+        addHandoverItem({
+          id: `auto_feed_${b.id}_${Date.now()}`,
+          babyId: b.id!,
+          description: `🍼 喂养已超期 ${formatDuration(stats.minutesSinceLast - stats.avgInterval)}，上次${dayjs(stats.lastFeeding?.startTime).format('HH:mm')}`,
+          status: 'attention',
+          priority: 'high'
+        });
+      }
+
+      const pendingReminders = await db.reminders
+        .filter(r => r.babyId === b.id && r.status === 'pending')
+        .toArray();
+
+      for (const r of pendingReminders) {
+        addHandoverItem({
+          id: `auto_reminder_${r.id}`,
+          babyId: b.id!,
+          description: `🔔 ${r.title} - ${dayjs(r.scheduledTime).format('HH:mm')}${r.assignedTo ? ` (@${r.assignedTo})` : ''}`,
+          status: 'pending',
+          priority: r.type === 'medication' ? 'high' : 'medium'
+        });
+      }
+    }
+  };
+
+  const groupedItems = useMemo(() => {
+    const groups: Record<string, HandoverItem[]> = {};
+    for (const item of pendingHandoverItems) {
+      const b = babies.find(x => x.id === item.babyId);
+      const key = b ? `${b.roomNumber}室 ${b.name}` : '未分配';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(item);
+    }
+    return groups;
+  }, [pendingHandoverItems, babies]);
+
+  const highPriorityCount = pendingHandoverItems.filter(i => i.priority === 'high').length;
+  const attentionCount = pendingHandoverItems.filter(i => i.status === 'attention').length;
+  const completedCount = pendingHandoverItems.filter(i => i.status === 'completed').length;
+
+  const openItemModal = (item?: HandoverItem) => {
+    setEditingItem(item || null);
+    itemForm.resetFields();
+    if (item) {
+      itemForm.setFieldsValue({
+        babyId: item.babyId,
+        description: item.description,
+        status: item.status,
+        priority: item.priority
+      });
+    } else {
+      itemForm.setFieldsValue({
+        status: 'pending',
+        priority: 'medium'
+      });
+    }
+    setItemModalOpen(true);
+  };
+
+  const handleSaveItem = async () => {
+    try {
+      const values = await itemForm.validateFields();
+      if (editingItem) {
+        updateHandoverItem(editingItem.id, { ...values });
+        message.success('事项已更新');
+      } else {
+        addHandoverItem({
+          id: `item_${Date.now()}`,
+          ...values
+        });
+        message.success('事项已添加');
+      }
+      setItemModalOpen(false);
+    } catch (err: any) {
+      if (!err?.errorFields) message.error('保存失败');
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (pendingHandoverItems.length === 0) {
+      message.warning('交班清单为空，请先添加事项');
+      return;
+    }
+    if (!oncomingNurse.trim()) {
+      message.warning('请输入接班护士姓名');
+      return;
+    }
+
+    try {
+      setSaving(true);
+
+      const now = new Date().toISOString();
+      const shiftInfo = SHIFT_OPTIONS.find(s => s.value === selectedShiftType)!;
+
+      const data: Omit<ShiftRecord, 'id'> = {
+        shiftType: selectedShiftType,
+        shiftDate: dayjs().format('YYYY-MM-DD'),
+        startTime: now,
+        endTime: now,
+        oncomingNurse: oncomingNurse.trim(),
+        outgoingNurse: currentNurse,
+        handoverItems: pendingHandoverItems,
+        notes: notes.trim(),
+        completed: true,
+        createdAt: now
+      };
+
+      await db.shiftRecords.add(data);
+
+      for (const item of pendingHandoverItems) {
+        if (item.status === 'pending') {
+          const b = babies.find(x => x.id === item.babyId);
+          const title = item.description.slice(0, 30);
+          await db.reminders.add({
+            babyId: item.babyId,
+            type: 'custom',
+            title: `[交班] ${title}`,
+            scheduledTime: dayjs().add(1, 'hour').toISOString(),
+            status: 'pending',
+            repeat: 'none',
+            assignedTo: oncomingNurse.trim(),
+            notes: item.description,
+            createdAt: now
+          });
+        }
+      }
+
+      addNotification('交班记录已保存，已同步生成提醒给接班护士', 'success');
+
+      modal.success({
+        title: '✅ 交班完成！',
+        content: (
+          <div>
+            <div style={{ marginBottom: 12 }}>
+              <strong>交班人:</strong> {currentNurse}
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <strong>接班人:</strong> {oncomingNurse}
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <strong>交班事项:</strong> 共 {pendingHandoverItems.length} 项
+            </div>
+            <div style={{ color: '#666' }}>
+              已将未完成事项转为接班护士的待办提醒
+            </div>
+          </div>
+        ),
+        okText: '确定',
+        onOk: () => {
+          clearHandoverItems();
+          setCurrentNurse(oncomingNurse.trim());
+          setOncomingNurse('');
+          setNotes('');
+        }
+      });
+
+    } catch (err) {
+      message.error('交班记录保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const renderNewShift = () => (
+    <Row gutter={20} style={{ height: '100%', padding: 20 }}>
+      <Col xs={24} md={14} style={{ display: 'flex', flexDirection: 'column' }}>
+        <Card
+          title={
+            <Space>
+              <FileTextOutlined style={{ color: '#ff85a2' }} />
+              <span>📝 交班事项清单</span>
+              {highPriorityCount > 0 && (
+                <Badge count={highPriorityCount} style={{ background: '#ff4d4f' }} offset={[4, 0]}>
+                  <Tag color="red" style={{ margin: 0 }}>高优先级</Tag>
+                </Badge>
+              )}
+            </Space>
+          }
+          extra={
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => openItemModal()}
+              style={{ background: 'linear-gradient(135deg, #ff85a2, #ff5c7a)', border: 'none' }}
+            >
+              手动添加事项
+            </Button>
+          }
+          style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+          bodyStyle={{ flex: 1, overflow: 'auto', padding: 16 }}
+        >
+          {pendingHandoverItems.length === 0 ? (
+            <Empty
+              description="暂无交班事项"
+              style={{ padding: 40 }}
+            >
+              <Space>
+                <Button onClick={autoGenerateHandoverItems} icon={<HistoryOutlined />}>
+                  自动生成建议事项
+                </Button>
+                <Button type="primary" onClick={() => openItemModal()} icon={<PlusOutlined />}>
+                  手动添加
+                </Button>
+              </Space>
+            </Empty>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {Object.entries(groupedItems).map(([groupKey, items]) => {
+                const b = babies.find(x => x.id === items[0]?.babyId);
+                return (
+                  <div key={groupKey}>
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      marginBottom: 8,
+                      paddingLeft: 8,
+                      borderLeft: '3px solid #ff85a2',
+                      fontWeight: 600,
+                      fontSize: 14
+                    }}>
+                      {b && (
+                        <Avatar
+                          size={28}
+                          style={{
+                            background: b.gender === 'male'
+                              ? 'linear-gradient(135deg, #69b1ff, #1677ff)'
+                              : 'linear-gradient(135deg, #ffb7d5, #ff5c7a)',
+                            fontSize: 12
+                          }}
+                          onClick={() => { setSelectedBaby(b); setActiveWindow('babyTimeline'); }}
+                        >
+                          {b.name.charAt(0)}
+                        </Avatar>
+                      )}
+                      <span>{groupKey}</span>
+                      <Tag color="default" style={{ marginLeft: 4 }}>
+                        {items.length} 项
+                      </Tag>
+                    </div>
+                    <List
+                      size="small"
+                      bordered
+                      dataSource={items}
+                      style={{ borderRadius: 8, overflow: 'hidden' }}
+                      renderItem={item => (
+                        <List.Item
+                          style={{
+                            padding: '12px 16px',
+                            background: item.status === 'attention' ? '#fff7f6' : undefined,
+                            borderLeft: `4px solid ${STATUS_CONFIG[item.status].color}`
+                          }}
+                          actions={[
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<EditOutlined />}
+                              onClick={() => openItemModal(item)}
+                            >编辑</Button>,
+                            <Checkbox
+                              checked={item.status === 'completed'}
+                              onChange={e => updateHandoverItem(item.id, {
+                                status: e.target.checked ? 'completed' : 'pending'
+                              })}
+                            >完成</Checkbox>,
+                            <Button
+                              type="text"
+                              size="small"
+                              danger
+                              icon={<DeleteOutlined />}
+                              onClick={() => removeHandoverItem(item.id)}
+                            />
+                          ]}
+                        >
+                          <List.Item.Meta
+                            avatar={
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: 36, height: 36,
+                                borderRadius: '50%',
+                                background: `${STATUS_CONFIG[item.status].color}22`,
+                                fontSize: 16
+                              }}>
+                                {STATUS_CONFIG[item.status].icon}
+                              </span>
+                            }
+                            title={
+                              <Space>
+                                <span
+                                  style={{
+                                    cursor: 'pointer',
+                                    textDecoration: item.status === 'completed' ? 'line-through' : 'none',
+                                    opacity: item.status === 'completed' ? 0.6 : 1
+                                  }}
+                                  onClick={() => {
+                                    const b = babies.find(x => x.id === item.babyId);
+                                    if (b) { setSelectedBaby(b); setActiveWindow('babyTimeline'); }
+                                  }}
+                                >
+                                  {item.description}
+                                </span>
+                                <Tag
+                                  color={item.priority === 'high' ? 'red' : item.priority === 'medium' ? 'orange' : 'default'}
+                                  style={{ margin: 0 }}
+                                >
+                                  {item.priority === 'high' ? '❗高' : item.priority === 'medium' ? '中' : '低'}
+                                </Tag>
+                                <Dropdown
+                                  trigger={['click']}
+                                  menu={{
+                                    items: (Object.keys(STATUS_CONFIG) as HandoverItemStatus[]).map(k => ({
+                                      key: k,
+                                      icon: <span>{STATUS_CONFIG[k].icon}</span>,
+                                      label: STATUS_CONFIG[k].label,
+                                      onClick: () => updateHandoverItem(item.id, { status: k })
+                                    }))
+                                  }}
+                                >
+                                  <Tag color={STATUS_CONFIG[item.status].color} style={{ cursor: 'pointer', margin: 0 }}>
+                                    {STATUS_CONFIG[item.status].label} ▼
+                                  </Tag>
+                                </Dropdown>
+                              </Space>
+                            }
+                          />
+                        </List.Item>
+                      )}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </Col>
+
+      <Col xs={24} md={10} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <Card title={
+          <Space>
+            <ClockCircleOutlined style={{ color: '#1677ff' }} />
+            班次信息
+          </Space>
+        }>
+          <Form form={form} layout="vertical">
+            <Form.Item name="shiftType" label="选择班次" rules={[{ required: true }]}>
+              <Radio.Group
+                value={selectedShiftType}
+                onChange={e => setSelectedShiftType(e.target.value)}
+                style={{ width: '100%' }}
+              >
+                {SHIFT_OPTIONS.map(opt => (
+                  <Radio.Button
+                    key={opt.value}
+                    value={opt.value}
+                    style={{
+                      width: '33.33%',
+                      textAlign: 'center',
+                      height: 'auto',
+                      padding: '12px 8px',
+                      borderColor: selectedShiftType === opt.value ? opt.color : undefined,
+                      background: selectedShiftType === opt.value ? `${opt.color}11` : undefined
+                    }}
+                  >
+                    <div style={{ fontSize: 20 }}>{opt.icon}</div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: opt.color }}>{opt.label}</div>
+                    <div style={{ fontSize: 10, color: '#999' }}>{opt.time}</div>
+                  </Radio.Button>
+                ))}
+              </Radio.Group>
+            </Form.Item>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="交班日期">
+                  <div style={{
+                    padding: '8px 12px',
+                    background: '#f5f5f5',
+                    borderRadius: 6,
+                    fontSize: 14,
+                    fontWeight: 500
+                  }}>
+                    📅 {dayjs().format('YYYY-MM-DD')}
+                  </div>
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="交班时间">
+                  <div style={{
+                    padding: '8px 12px',
+                    background: '#f5f5f5',
+                    borderRadius: 6,
+                    fontSize: 14,
+                    fontWeight: 500
+                  }}>
+                    🕒 {dayjs().format('HH:mm')}
+                  </div>
+                </Form.Item>
+              </Col>
+            </Row>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="交班护士 (您)">
+                  <div style={{
+                    padding: '8px 12px',
+                    background: 'linear-gradient(135deg, #e6f4ff, #f0f5ff)',
+                    borderRadius: 6,
+                    fontSize: 14,
+                    fontWeight: 600,
+                    color: '#1677ff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6
+                  }}>
+                    👩‍⚕️ {currentNurse}
+                  </div>
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="接班护士" required>
+                  <Input
+                    prefix={<UserOutlined />}
+                    value={oncomingNurse}
+                    onChange={e => setOncomingNurse(e.target.value)}
+                    placeholder="请输入姓名"
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+          </Form>
+        </Card>
+
+        <Card
+          title={
+            <Space>
+              <StarOutlined style={{ color: '#faad14' }} />
+              统计概览
+            </Space>
+          }
+          size="small"
+        >
+          <Row gutter={[8, 8]}>
+            <Col span={12}>
+              <div style={{
+                padding: 12,
+                borderRadius: 8,
+                background: pendingHandoverItems.length > 0 ? '#fffbe6' : '#f5f5f5',
+                textAlign: 'center'
+              }}>
+                <div style={{ fontSize: 24, fontWeight: 700, color: '#faad14' }}>
+                  {pendingHandoverItems.length}
+                </div>
+                <div style={{ fontSize: 12, color: '#666' }}>事项总数</div>
+              </div>
+            </Col>
+            <Col span={12}>
+              <div style={{
+                padding: 12,
+                borderRadius: 8,
+                background: attentionCount > 0 ? '#fff2f0' : '#f5f5f5',
+                textAlign: 'center'
+              }}>
+                <div style={{
+                  fontSize: 24,
+                  fontWeight: 700,
+                  color: attentionCount > 0 ? '#ff4d4f' : '#999'
+                }}>
+                  {attentionCount}
+                </div>
+                <div style={{ fontSize: 12, color: '#666' }}>需重点关注</div>
+              </div>
+            </Col>
+            <Col span={12}>
+              <div style={{
+                padding: 12,
+                borderRadius: 8,
+                background: completedCount > 0 ? '#f6ffed' : '#f5f5f5',
+                textAlign: 'center'
+              }}>
+                <div style={{ fontSize: 24, fontWeight: 700, color: '#52c41a' }}>
+                  {completedCount}
+                </div>
+                <div style={{ fontSize: 12, color: '#666' }}>本班已完成</div>
+              </div>
+            </Col>
+            <Col span={12}>
+              <div style={{
+                padding: 12,
+                borderRadius: 8,
+                background: highPriorityCount > 0 ? '#fff2f0' : '#f5f5f5',
+                textAlign: 'center'
+              }}>
+                <div style={{
+                  fontSize: 24,
+                  fontWeight: 700,
+                  color: highPriorityCount > 0 ? '#ff4d4f' : '#999'
+                }}>
+                  {highPriorityCount}
+                </div>
+                <div style={{ fontSize: 12, color: '#666' }}>高优先级</div>
+              </div>
+            </Col>
+          </Row>
+        </Card>
+
+        <Card title="💬 交班备注" size="small" style={{ flex: 1 }}>
+          <TextArea
+            rows={5}
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            placeholder="请填写本班次特殊情况、重要事件、需特别交代的事项等..."
+            style={{ resize: 'none' }}
+          />
+        </Card>
+
+        <Button
+          type="primary"
+          size="large"
+          icon={<SendOutlined />}
+          onClick={handleSubmit}
+          loading={saving}
+          disabled={pendingHandoverItems.length === 0 || !oncomingNurse.trim()}
+          style={{
+            background: 'linear-gradient(135deg, #52c41a, #389e0d)',
+            border: 'none',
+            height: 48,
+            fontSize: 15,
+            fontWeight: 600,
+            boxShadow: '0 4px 12px rgba(82, 196, 26, 0.3)'
+          }}
+        >
+          ✅ 确认完成交班
+        </Button>
+      </Col>
+    </Row>
+  );
+
+  const renderHistory = () => (
+    <div style={{ padding: 20 }}>
+      {historyShifts.length === 0 ? (
+        <Empty description="暂无交班历史记录" style={{ padding: 60 }} />
+      ) : (
+        <List
+          dataSource={historyShifts}
+          renderItem={(record) => {
+            const sInfo = SHIFT_OPTIONS.find(s => s.value === record.shiftType)!;
+            return (
+              <Card
+                key={record.id}
+                style={{ marginBottom: 16, borderRadius: 12 }}
+                bodyStyle={{ padding: 0 }}
+              >
+                <div style={{
+                  padding: '16px 20px',
+                  background: `linear-gradient(135deg, ${sInfo.color}11 0%, #fff 100%)`,
+                  borderBottom: '1px solid #f0f0f0',
+                  borderRadius: '12px 12px 0 0',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <Space size="large">
+                    <div style={{ fontSize: 28 }}>{sInfo.icon}</div>
+                    <div>
+                      <div style={{ fontSize: 16, fontWeight: 700 }}>
+                        {sInfo.label}
+                        <Tag color={sInfo.color} style={{ marginLeft: 12 }}>
+                          {record.shiftDate}
+                        </Tag>
+                      </div>
+                      <div style={{ fontSize: 13, color: '#666', marginTop: 4 }}>
+                        👩‍⚕️ <strong>{record.outgoingNurse}</strong>
+                        {' → '}
+                        👩‍⚕️ <strong>{record.oncomingNurse}</strong>
+                      </div>
+                    </div>
+                  </Space>
+                  <Space>
+                    <Tag color={record.completed ? 'green' : 'orange'}>
+                      {record.completed ? '✅ 已完成' : '⏳ 进行中'}
+                    </Tag>
+                    <div style={{ fontSize: 12, color: '#999' }}>
+                      {formatDateTime(record.createdAt)}
+                    </div>
+                  </Space>
+                </div>
+
+                <div style={{ padding: 16 }}>
+                  <Row gutter={[12, 12]}>
+                    <Col span={6}>
+                      <Statistic title="交班事项" value={record.handoverItems.length} />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic
+                        title="已完成"
+                        value={record.handoverItems.filter(i => i.status === 'completed').length}
+                        valueStyle={{ color: '#52c41a' }}
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic
+                        title="重点关注"
+                        value={record.handoverItems.filter(i => i.status === 'attention').length}
+                        valueStyle={{ color: '#ff4d4f' }}
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic
+                        title="待处理"
+                        value={record.handoverItems.filter(i => i.status === 'pending' || i.status === 'in_progress').length}
+                        valueStyle={{ color: '#faad14' }}
+                      />
+                    </Col>
+                  </Row>
+
+                  <Divider style={{ margin: '12px 0' }} />
+
+                  <Timeline
+                    style={{ maxHeight: 260, overflow: 'auto' }}
+                    items={record.handoverItems.map(item => {
+                      const b = babies.find(x => x.id === item.babyId);
+                      return {
+                        color: STATUS_CONFIG[item.status].color,
+                        dot: <span style={{ fontSize: 14 }}>{STATUS_CONFIG[item.status].icon}</span>,
+                        children: (
+                          <div>
+                            <div style={{ fontWeight: 500 }}>
+                              {b && (
+                                <Tag color="purple" style={{ marginRight: 8 }}>
+                                  {b.name}
+                                </Tag>
+                              )}
+                              {item.description}
+                            </div>
+                            <div style={{ marginTop: 4 }}>
+                              <Tag
+                                style={{ margin: 0 }}
+                                color={STATUS_CONFIG[item.status].color}
+                              >
+                                {STATUS_CONFIG[item.status].label}
+                              </Tag>
+                              <Tag
+                                style={{ marginLeft: 8 }}
+                                color={item.priority === 'high' ? 'red' : item.priority === 'medium' ? 'orange' : 'default'}
+                              >
+                                {item.priority === 'high' ? '高优先级' : item.priority === 'medium' ? '中优先级' : '低优先级'}
+                              </Tag>
+                            </div>
+                          </div>
+                        )
+                      };
+                    })}
+                  />
+
+                  {record.notes && (
+                    <>
+                      <Divider style={{ margin: '12px 0' }} />
+                      <div style={{
+                        padding: 12,
+                        background: '#fafafa',
+                        borderRadius: 8,
+                        fontSize: 13,
+                        color: '#666'
+                      }}>
+                        <strong>📝 交班备注:</strong> {record.notes}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </Card>
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{
+        padding: '12px 20px',
+        borderBottom: '1px solid #f0f0f0',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        background: '#fff'
+      }}>
+        <Radio.Group
+          value={activeTab}
+          onChange={e => setActiveTab(e.target.value)}
+          optionType="button"
+          buttonStyle="solid"
+        >
+          <Radio.Button value="new" style={{ padding: '6px 20px', fontWeight: 600 }}>
+            <FileTextOutlined /> 新建交班
+          </Radio.Button>
+          <Radio.Button value="history" style={{ padding: '6px 20px', fontWeight: 600 }}>
+            <HistoryOutlined /> 历史记录 ({historyShifts.length})
+          </Radio.Button>
+        </Radio.Group>
+
+        <div style={{ flex: 1 }} />
+
+        {activeTab === 'new' && (
+          <Space>
+            <Button icon={<WarningOutlined />} onClick={autoGenerateHandoverItems}>
+              自动生成建议
+            </Button>
+            <PopconfirmWrapper onConfirm={() => {
+              clearHandoverItems();
+              message.success('清单已清空');
+            }}>
+              <Button danger>清空清单</Button>
+            </PopconfirmWrapper>
+          </Space>
+        )}
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {activeTab === 'new' ? renderNewShift() : renderHistory()}
+      </div>
+
+      <Modal
+        title={editingItem ? '编辑交班事项' : '添加交班事项'}
+        open={itemModalOpen}
+        onOk={handleSaveItem}
+        onCancel={() => setItemModalOpen(false)}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Form form={itemForm} layout="vertical">
+          <Form.Item
+            name="babyId"
+            label="关联宝宝"
+            rules={[{ required: true, message: '请选择宝宝' }]}
+          >
+            <Select placeholder="请选择宝宝" showSearch optionFilterProp="label">
+              {babies.map(b => (
+                <Option key={b.id} value={b.id} label={`${b.name} ${b.roomNumber}${b.bedNumber}`}>
+                  <Space>
+                    <Avatar size="small" style={{
+                      background: b.gender === 'male'
+                        ? 'linear-gradient(135deg, #69b1ff, #1677ff)'
+                        : 'linear-gradient(135deg, #ffb7d5, #ff5c7a)',
+                      fontSize: 12
+                    }}>
+                      {b.name.charAt(0)}
+                    </Avatar>
+                    <span>{b.name}</span>
+                    <Tag color="default">{b.roomNumber}{b.bedNumber}</Tag>
+                  </Space>
+                </Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item
+            name="description"
+            label="事项描述"
+            rules={[{ required: true, message: '请输入事项描述' }]}
+          >
+            <TextArea rows={3} placeholder="请详细描述需要交接的事项" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="status" label="状态" rules={[{ required: true }]}>
+                <Select>
+                  {(Object.keys(STATUS_CONFIG) as HandoverItemStatus[]).map(k => (
+                    <Option key={k} value={k}>
+                      {STATUS_CONFIG[k].icon} {STATUS_CONFIG[k].label}
+                    </Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="priority" label="优先级" rules={[{ required: true }]}>
+                <Select>
+                  <Option value="high">❗ 高优先级</Option>
+                  <Option value="medium">中优先级</Option>
+                  <Option value="low">低优先级</Option>
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Modal>
+    </div>
+  );
+};
+
+const PopconfirmWrapper: React.FC<{
+  onConfirm: () => void;
+  children: React.ReactElement;
+}> = ({ onConfirm, children }) => {
+  return React.cloneElement(children, {
+    onClick: (e: any) => {
+      Modal.confirm({
+        title: '确认清空交班清单?',
+        content: '所有未保存的事项将被清除',
+        okText: '确认清空',
+        okType: 'danger',
+        cancelText: '取消',
+        onOk: onConfirm
+      });
+    }
+  });
+};
+
+export default ShiftRecordPage;
