@@ -141,6 +141,7 @@ export interface Reminder {
   repeat: 'none' | 'hourly' | 'daily';
   intervalMinutes?: number;
   completedAt?: string;
+  completedBy?: string;
   assignedTo?: string;
   notes?: string;
   handoverId?: number;
@@ -158,6 +159,9 @@ export interface HandoverItem {
   status: HandoverItemStatus;
   priority: 'low' | 'medium' | 'high';
   toReminder?: boolean;
+  assignedTo?: string;
+  completedAt?: string;
+  completedBy?: string;
 }
 
 export interface ShiftRecord {

@@ -13,7 +13,7 @@ import {
 import dayjs from 'dayjs';
 import { useLiveQuery, triggerRefresh } from '../hooks/useLiveQuery';
 import { db } from '../db';
-import { Baby, Reminder, ReminderType, ReminderStatus } from '../types';
+import { Baby, Reminder, ReminderType, ReminderStatus, ShiftRecord } from '../types';
 import { useAppStore } from '../store/appStore';
 import { getBabyFeedingStats, getRooms, formatDateTime } from '../utils';
 
@@ -86,6 +86,11 @@ const CareReminder: React.FC = () => {
     () => db.reminders.orderBy('scheduledTime').toArray(),
     [], []
   ) as Reminder[];
+
+  const shiftRecords = useLiveQuery(
+    () => db.shiftRecords.orderBy('createdAt').reverse().limit(200).toArray(),
+    [], []
+  ) as ShiftRecord[];
 
   useEffect(() => {
     autoUpdateMissed();
@@ -204,10 +209,31 @@ const CareReminder: React.FC = () => {
   };
 
   const handleComplete = async (r: Reminder) => {
+    const completedAt = new Date().toISOString();
     await db.reminders.update(r.id!, {
       status: 'completed' as ReminderStatus,
-      completedAt: new Date().toISOString()
+      completedAt
     });
+
+    if (r.handoverId && r.handoverItemId) {
+      const shift = await db.shiftRecords.get(r.handoverId);
+      if (shift) {
+        const updated = shift.handoverItems.map(item => {
+          if (item.id === r.handoverItemId) {
+            return {
+              ...item,
+              status: 'completed' as const,
+              completedAt,
+              completedBy: r.completedBy || currentNurse
+            };
+          }
+          return item;
+        });
+        await db.shiftRecords.update(r.handoverId, { handoverItems: updated });
+      }
+    }
+
+    await triggerRefresh();
     message.success('提醒已标记完成');
   };
 
@@ -635,7 +661,14 @@ const CareReminder: React.FC = () => {
       </div>
 
       <Modal
-        title={editingReminder ? '编辑提醒' : '新建护理提醒'}
+        title={editingReminder ? (
+          <Space>
+            <span>编辑提醒</span>
+            {editingReminder.handoverId && (
+              <Tag color="magenta" icon={<TeamOutlined />}>交班来源</Tag>
+            )}
+          </Space>
+        ) : '新建护理提醒'}
         open={modalOpen}
         onOk={handleSave}
         onCancel={() => setModalOpen(false)}
@@ -643,6 +676,85 @@ const CareReminder: React.FC = () => {
         cancelText="取消"
         width={620}
       >
+        {editingReminder?.handoverId && (
+          <div style={{
+            marginBottom: 16,
+            padding: 12,
+            background: 'linear-gradient(135deg, #fff1f0 0%, #fff7e6 100%)',
+            borderRadius: 8,
+            border: '1px solid #ffccc7',
+            fontSize: 12
+          }}>
+            <div style={{
+              fontWeight: 600,
+              fontSize: 13,
+              color: '#cf1322',
+              marginBottom: 8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6
+            }}>
+              <TeamOutlined /> 交班来源追踪
+            </div>
+            {(() => {
+              const srcShift = shiftRecords.find(s => s.id === editingReminder.handoverId);
+              const SHIFT_LABELS: any = {
+                morning: { icon: '🌅', label: '早班', color: '#faad14' },
+                afternoon: { icon: '🌇', label: '中班', color: '#eb2f96' },
+                night: { icon: '🌙', label: '夜班', color: '#722ed1' }
+              };
+              const sLabel = srcShift ? (SHIFT_LABELS[srcShift.shiftType] || { icon: '📅', label: '交班' }) : null;
+              const srcItem = srcShift?.handoverItems.find(i => i.id === editingReminder.handoverItemId);
+              const srcBaby = babies.find(b => b.id === editingReminder.babyId);
+              return (
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  {srcShift && sLabel && (
+                    <div>
+                      <span style={{ color: '#888' }}>来源班次：</span>
+                      <span style={{ color: sLabel.color, fontWeight: 600 }}>
+                        {sLabel.icon} {sLabel.label}
+                      </span>
+                      <span style={{ color: '#888', margin: '0 6px' }}>·</span>
+                      <span>{srcShift.shiftDate}</span>
+                      <span style={{ color: '#888', margin: '0 6px' }}>·</span>
+                      <span>👩‍⚕️ {srcShift.outgoingNurse} → {srcShift.oncomingNurse}</span>
+                    </div>
+                  )}
+                  {srcBaby && (
+                    <div>
+                      <span style={{ color: '#888' }}>关联宝宝：</span>
+                      <Tag color="purple">{srcBaby.name} {srcBaby.roomNumber}{srcBaby.bedNumber}</Tag>
+                    </div>
+                  )}
+                  {srcItem && (
+                    <div>
+                      <span style={{ color: '#888' }}>原交班事项：</span>
+                      <span style={{ fontWeight: 500 }}>{srcItem.description}</span>
+                      <Tag color={
+                        srcItem.priority === 'high' ? 'red' :
+                          srcItem.priority === 'medium' ? 'orange' : 'default'
+                      } style={{ marginLeft: 6 }}>
+                        {srcItem.priority === 'high' ? '高优' :
+                          srcItem.priority === 'medium' ? '中优' : '低优'}
+                      </Tag>
+                    </div>
+                  )}
+                  {srcItem?.completedAt && (
+                    <div style={{ color: '#52c41a' }}>
+                      ✅ 已闭环 · {formatDateTime(srcItem.completedAt)}
+                      {srcItem.completedBy && ` · 处理护士: ${srcItem.completedBy}`}
+                    </div>
+                  )}
+                  {srcShift?.notes && (
+                    <div style={{ color: '#873800' }}>
+                      📝 交班备注：{srcShift.notes}
+                    </div>
+                  )}
+                </Space>
+              );
+            })()}
+          </div>
+        )}
         <Form form={form} layout="vertical">
           <Form.Item
             name="babyIds"

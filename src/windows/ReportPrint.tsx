@@ -166,15 +166,20 @@ const ReportPrint: React.FC = () => {
 
       let heightLeft = imgHeight;
       let position = 10;
+      const pageInnerHeight = pdfHeight - 20;
 
       pdf.addImage(imgData, 'PNG', 10, position, imgWidth, imgHeight);
-      heightLeft -= (pdfHeight - 20);
+      heightLeft -= pageInnerHeight;
 
-      while (heightLeft > 0) {
+      let safetyCounter = 0;
+      while (heightLeft > 0 && safetyCounter < 50) {
+        safetyCounter++;
         position = heightLeft - imgHeight + 10;
-        pdf.addPage();
-        pdf.addImage(imgData, 'PNG', 10, position, imgWidth, imgHeight);
-        heightLeft -= (pdfHeight - 20);
+        if (heightLeft > 10) {
+          pdf.addPage();
+          pdf.addImage(imgData, 'PNG', 10, position, imgWidth, imgHeight);
+        }
+        heightLeft -= pageInnerHeight;
       }
 
       let filterTags: string;
