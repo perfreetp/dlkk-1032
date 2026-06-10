@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Card, Row, Col, Table, Button, Tag, Space, Select, DatePicker,
   Empty, Statistic, Avatar, Divider, Tabs, List, Tooltip, Checkbox,
-  message, App, Progress, Radio, Modal, Dropdown, Badge
+  message, App, Progress, Radio, Modal, Dropdown, Badge, Segmented,
+  Timeline
 } from 'antd';
 import {
   PrinterOutlined, DownloadOutlined, FileTextOutlined,
@@ -176,24 +177,35 @@ const ReportPrint: React.FC = () => {
         heightLeft -= (pdfHeight - 20);
       }
 
-      const filterTags = [
-        reportDate,
-        filterRoom !== 'all' ? `${filterRoom}室` : null,
-        filterBaby !== 'all' ? (babies.find(b => b.id === filterBaby)?.name || '') : null,
-        `${selectedBabies.length}位宝宝`
-      ].filter(Boolean).join('_');
+      let filterTags: string;
+      if (reportType === 'shift') {
+        const shiftLabel = shiftFilter === 'all' ? '全部班次' : SHIFT_OPTIONS.find(s => s.value === shiftFilter)?.label;
+        filterTags = [
+          reportDate,
+          shiftLabel,
+          `交接${shiftSummary.totalShifts}次`,
+          `${shiftSummary.totalItems}项`
+        ].filter(Boolean).join('_');
+      } else {
+        filterTags = [
+          reportDate,
+          filterRoom !== 'all' ? `${filterRoom}室` : null,
+          filterBaby !== 'all' ? (babies.find(b => b.id === filterBaby)?.name || '') : null,
+          `${selectedBabies.length}位宝宝`
+        ].filter(Boolean).join('_');
+      }
 
       let savePath = null;
       if ((window as any).electronAPI?.showSaveDialog) {
         savePath = await (window as any).electronAPI.showSaveDialog(
-          `护理日报_${filterTags}.pdf`
+          reportType === 'shift' ? `交班摘要_${filterTags}.pdf` : `护理日报_${filterTags}.pdf`
         );
       }
 
       if (savePath) {
         pdf.save(savePath);
       } else {
-        pdf.save(`护理日报_${filterTags}.pdf`);
+        pdf.save(reportType === 'shift' ? `交班摘要_${filterTags}.pdf` : `护理日报_${filterTags}.pdf`);
       }
 
       addNotification(`PDF 导出成功！(${filterTags})`, 'success');
@@ -356,6 +368,14 @@ const ReportPrint: React.FC = () => {
     }
   ];
 
+  const filteredShiftRecords = useMemo(() => {
+    return shiftRecords.filter(s => {
+      if (s.shiftDate !== reportDate) return false;
+      if (shiftFilter !== 'all' && s.shiftType !== shiftFilter) return false;
+      return true;
+    });
+  }, [shiftRecords, reportDate, shiftFilter]);
+
   const filterSummary = useMemo(() => {
     if (reportType === 'shift') {
       const s = SHIFT_OPTIONS.find(x => x.value === shiftFilter);
@@ -374,14 +394,6 @@ const ReportPrint: React.FC = () => {
     return tags.join(' · ');
   }, [filterRoom, filterBaby, filteredBabies, babies, reportType, reportDate, shiftFilter, filteredShiftRecords]);
 
-  const filteredShiftRecords = useMemo(() => {
-    return shiftRecords.filter(s => {
-      if (s.shiftDate !== reportDate) return false;
-      if (shiftFilter !== 'all' && s.shiftType !== shiftFilter) return false;
-      return true;
-    });
-  }, [shiftRecords, reportDate, shiftFilter]);
-
   const shiftSummary = useMemo(() => {
     let totalItems = 0;
     let attention = 0;
@@ -392,6 +404,10 @@ const ReportPrint: React.FC = () => {
     const allergyBabies = new Set<number>();
     const specialNoteBabies = new Set<number>();
     const babyItems: Record<number, any[]> = {};
+    const attentionItems: any[] = [];
+    const attentionBabiesArr: number[] = [];
+    const itemReminderMap = new Map<string, any>();
+    const attentionBabySet = new Set<number>();
 
     for (const s of filteredShiftRecords) {
       for (const item of s.handoverItems) {
@@ -414,6 +430,15 @@ const ReportPrint: React.FC = () => {
         if (hasReminder) {
           toReminders++;
           if (hasReminder.status === 'completed') resolvedReminders++;
+          itemReminderMap.set(item.id, hasReminder);
+        }
+
+        if (item.status === 'attention') {
+          attentionItems.push(item);
+          if (item.babyId && !attentionBabySet.has(item.babyId)) {
+            attentionBabySet.add(item.babyId);
+            attentionBabiesArr.push(item.babyId);
+          }
         }
       }
     }
@@ -423,7 +448,17 @@ const ReportPrint: React.FC = () => {
       allergyCount: allergyBabies.size,
       specialNoteCount: specialNoteBabies.size,
       babyItems,
-      totalShifts: filteredShiftRecords.length
+      totalShifts: filteredShiftRecords.length,
+      attentionCount: attention,
+      completedCount: completed,
+      pendingCount: pending,
+      toReminderCount: toReminders,
+      reminderResolvedCount: resolvedReminders,
+      allergyBabies: Array.from(allergyBabies),
+      notesCount: specialNoteBabies.size,
+      attentionItems,
+      attentionBabies: attentionBabiesArr,
+      itemReminderMap
     };
   }, [filteredShiftRecords, babies, allReminders]);
 
@@ -1077,7 +1112,7 @@ const ReportPrint: React.FC = () => {
               ) : (
                 <Segmented
                   value={shiftFilter}
-                  onChange={(v) => setShiftFilter(v as any)}
+                  onChange={(v: any) => setShiftFilter(v as any)}
                   options={SHIFT_OPTIONS.map(s => ({
                     label: (
                       <span style={{ fontWeight: 500 }}>
@@ -1395,7 +1430,7 @@ const ReportPrint: React.FC = () => {
                           </div>
                         )}
 
-                        {h?.warnings.length > 0 && (
+                        {h && h.warnings && h.warnings.length > 0 && (
                           <div style={{
                             padding: 8,
                             background: '#fff7f6',
@@ -1459,158 +1494,385 @@ const ReportPrint: React.FC = () => {
             minHeight: 800,
             width: '100%'
           }}>
-            <div className="print-container">
-              <div className="report-header">
-                <div className="report-title">🏥 月子中心 宝宝护理日报单</div>
-                <div className="report-subtitle">
-                  护理日期：{dayjs(reportDate).format('YYYY年MM月DD日 dddd')}
-                  <span style={{ margin: '0 8px' }}>|</span>
-                  制表时间：{dayjs().format('YYYY-MM-DD HH:mm')}
-                  <span style={{ margin: '0 8px' }}>|</span>
-                  制表人：{currentNurse}
+            {reportType === 'shift' ? (
+              <div className="print-container">
+                <div className="report-header">
+                  <div className="report-title">🏥 月子中心 班次交接摘要</div>
+                  <div className="report-subtitle">
+                    交接日期：{dayjs(reportDate).format('YYYY年MM月DD日 dddd')}
+                    <span style={{ margin: '0 8px' }}>|</span>
+                    班次：{shiftFilter === 'all' ? '全部班次' : SHIFT_OPTIONS.find(s => s.value === shiftFilter)?.label}
+                    <span style={{ margin: '0 8px' }}>|</span>
+                    制表时间：{dayjs().format('YYYY-MM-DD HH:mm')}
+                    <span style={{ margin: '0 8px' }}>|</span>
+                    制表人：{currentNurse}
+                  </div>
+                  <div className="report-subtitle" style={{ color: '#666', fontSize: 11 }}>
+                    📋 筛选条件：{filterSummary}
+                  </div>
                 </div>
-                <div className="report-subtitle" style={{ color: '#666', fontSize: 11 }}>
-                  📋 筛选条件：{filterSummary}
+
+                <div className="report-section">
+                  <div className="report-section-title">📊 交接总览</div>
+                  <table className="report-table">
+                    <thead>
+                      <tr>
+                        <th>交接班次</th><th>交班事项</th><th>重点关注</th><th>已完成</th>
+                        <th>待处理</th><th>已转提醒</th><th>提醒已闭环</th>
+                        <th>涉及过敏</th><th>特殊备注</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td style={{ textAlign: 'center', fontWeight: 600 }}>{shiftSummary.totalShifts} 次</td>
+                        <td style={{ textAlign: 'center' }}>{shiftSummary.totalItems} 项</td>
+                        <td style={{ textAlign: 'center', color: '#ff4d4f', fontWeight: 600 }}>{shiftSummary.attentionCount}</td>
+                        <td style={{ textAlign: 'center', color: '#52c41a' }}>{shiftSummary.completedCount}</td>
+                        <td style={{ textAlign: 'center', color: '#fa8c16' }}>{shiftSummary.pendingCount}</td>
+                        <td style={{ textAlign: 'center' }}>{shiftSummary.toReminderCount}</td>
+                        <td style={{ textAlign: 'center', color: '#52c41a' }}>{shiftSummary.reminderResolvedCount}</td>
+                        <td style={{ textAlign: 'center', color: '#eb2f96' }}>{shiftSummary.allergyBabies.length}</td>
+                        <td style={{ textAlign: 'center' }}>{shiftSummary.notesCount}</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
-              </div>
 
-              <div className="report-section">
-                <div className="report-section-title">📊 今日护理总览</div>
-                <table className="report-table">
-                  <thead>
-                    <tr>
-                      <th>在住宝宝</th><th>总喂养次数</th><th>总奶量(ml)</th>
-                      <th>亲喂时长</th><th>尿片</th><th>总睡眠</th>
-                      <th>体温记录</th><th>体重记录</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style={{ textAlign: 'center', fontWeight: 600 }}>{filteredBabies.length} 位</td>
-                      <td style={{ textAlign: 'center' }}>{totalStats.totalFeedings} 次</td>
-                      <td style={{ textAlign: 'center' }}>{totalStats.totalMilk || '-'}</td>
-                      <td style={{ textAlign: 'center' }}>{formatDuration(totalStats.totalBreastMin)}</td>
-                      <td style={{ textAlign: 'center' }}>💧{totalStats.totalWet} / 💩{totalStats.totalStool}</td>
-                      <td style={{ textAlign: 'center' }}>{formatDuration(totalStats.totalSleepMin)}</td>
-                      <td style={{ textAlign: 'center' }}>{totalStats.tempCount} 次</td>
-                      <td style={{ textAlign: 'center' }}>{totalStats.weightCount} 次</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              {filteredBabies.map(baby => {
-                const stats = allStats.get(baby.id!);
-                if (!stats) return null;
-                const health = getBabyHealthTag(stats);
-                return (
-                  <div key={baby.id} className="report-section" style={{ pageBreakInside: 'avoid' }}>
-                    <div className="report-section-title">
-                      👶 {baby.name}
-                      <Tag style={{ marginLeft: 8 }}>{baby.gender === 'male' ? '男' : '女'}</Tag>
-                      <span style={{ fontSize: 13, color: '#666', marginLeft: 8, fontWeight: 400 }}>
-                        {baby.roomNumber}室{baby.bedNumber}床 · 妈妈:{baby.motherName} · {calculateAgeDays(baby.birthDate)}天
-                      </span>
-                      <span style={{
-                        float: 'right',
-                        fontSize: 13,
-                        fontWeight: 500,
-                        color: health.color === 'green' ? '#52c41a' : health.color
+                <div className="report-section">
+                  <div className="report-section-title">📅 班次交接详情</div>
+                  {filteredShiftRecords.map((shift) => {
+                    const sItems = shift.handoverItems;
+                    const shiftOpt = SHIFT_OPTIONS.find(o => o.value === shift.shiftType) || SHIFT_OPTIONS[0];
+                    return (
+                      <div key={shift.id} style={{
+                        marginBottom: 12,
+                        padding: 12,
+                        border: '1px solid #eee',
+                        borderRadius: 8
                       }}>
-                        {health.label}
-                      </span>
-                    </div>
-                    <Row gutter={[8, 8]} style={{ marginBottom: 8 }}>
-                      <Col span={6}>
-                        <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
-                          <div style={{ color: '#888' }}>🍼 喂养</div>
-                          <div style={{ fontWeight: 600 }}>
-                            {stats.feedingCount}次{stats.totalBottle ? ` · ${stats.totalBottle}ml` : ''}
-                          </div>
+                        <div style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          marginBottom: 8
+                        }}>
+                          <Space>
+                            <span style={{
+                              fontSize: 14,
+                              fontWeight: 600,
+                              color: shiftOpt.color
+                            }}>
+                              {shiftOpt.icon} {shiftOpt.label}
+                            </span>
+                            <Tag color="blue">{shift.outgoingNurse} → {shift.oncomingNurse}</Tag>
+                            <span style={{ fontSize: 11, color: '#999' }}>
+                              {formatTime(shift.createdAt)}
+                            </span>
+                          </Space>
+                          <Space size={4}>
+                            {sItems.filter(i => i.status === 'attention').length > 0 && (
+                              <Tag color="red">⚠️ {sItems.filter(i => i.status === 'attention').length} 重点</Tag>
+                            )}
+                            {sItems.filter(i => i.status === 'pending' || i.status === 'in_progress').length > 0 && (
+                              <Tag color="orange">⏳ {sItems.filter(i => i.status === 'pending' || i.status === 'in_progress').length} 待处理</Tag>
+                            )}
+                          </Space>
                         </div>
-                      </Col>
-                      <Col span={6}>
-                        <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
-                          <div style={{ color: '#888' }}>🧷 尿/便</div>
-                          <div style={{ fontWeight: 600 }}>💧{stats.wetCount} / 💩{stats.stoolCount}</div>
-                        </div>
-                      </Col>
-                      <Col span={6}>
-                        <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
-                          <div style={{ color: '#888' }}>😴 睡眠</div>
-                          <div style={{ fontWeight: 600 }}>{formatDuration(stats.totalSleepMin)}</div>
-                        </div>
-                      </Col>
-                      <Col span={6}>
-                        <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
-                          <div style={{ color: '#888' }}>🌡️ 体温</div>
-                          <div style={{ fontWeight: 600 }}>{stats.avgTemp ? `${stats.avgTemp.toFixed(1)}°C` : '-'}</div>
-                        </div>
-                      </Col>
-                    </Row>
-
-                    {stats.feedings?.length > 0 && (
-                      <>
-                        <div style={{ fontSize: 13, fontWeight: 600, margin: '8px 0 6px' }}>🍼 喂养明细</div>
                         <table className="report-table">
                           <thead>
                             <tr>
-                              <th style={{ width: 90 }}>时间</th>
-                              <th>方式</th>
-                              <th style={{ width: 90 }}>奶量/时长</th>
-                              <th style={{ width: 60 }}>拍嗝</th>
-                              <th style={{ width: 60 }}>吐奶</th>
-                              <th>护理人</th>
+                              <th style={{ width: 60 }}>宝宝</th>
+                              <th>事项内容</th>
+                              <th style={{ width: 70 }}>状态</th>
+                              <th style={{ width: 60 }}>优先级</th>
+                              <th style={{ width: 90 }}>提醒状态</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {stats.feedings.map((f: any) => (
-                              <tr key={f.id}>
-                                <td>{formatTime(f.startTime)}</td>
-                                <td>{getFeedingTypeLabel(f.type)}</td>
-                                <td>{f.amount ? `${f.amount}ml` : `${(f.leftDuration||0)+(f.rightDuration||0)}分`}</td>
-                                <td style={{ textAlign: 'center' }}>{f.burped ? '✅' : '❌'}</td>
-                                <td style={{ textAlign: 'center' }}>{f.spitUp ? '⚠️' : '-'}</td>
-                                <td>{f.caregiver}</td>
-                              </tr>
-                            ))}
+                            {sItems.map((item) => {
+                              const rem = allReminders.find(r =>
+                                r.handoverId === shift.id &&
+                                (r.handoverItemId === item.id ||
+                                  r.notes?.includes(item.description.slice(0, 15)))
+                              );
+                              const baby = babies.find(b => b.id === item.babyId);
+                              const remStatus =
+                                rem?.status === 'completed' ? <span style={{ color: '#52c41a' }}>✅ 已完成</span> :
+                                  rem?.status === 'missed' ? <span style={{ color: '#ff4d4f' }}>❌ 错过</span> :
+                                    rem ? <span style={{ color: '#1890ff' }}>🔔 跟进中</span> :
+                                      item.toReminder ? <span style={{ color: '#fa8c16' }}>待生成</span> : '-';
+                              return (
+                                <tr key={item.id}>
+                                  <td>{baby?.name || '-'}</td>
+                                  <td>{item.description}</td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    {item.status === 'attention' && '⚠️ 重点'}
+                                    {item.status === 'completed' && <span style={{ color: '#52c41a' }}>✅ 完成</span>}
+                                    {item.status === 'pending' && <span style={{ color: '#fa8c16' }}>⏳ 待办</span>}
+                                    {item.status === 'in_progress' && <span style={{ color: '#1890ff' }}>🔄 处理中</span>}
+                                  </td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    {item.priority === 'high' ? '🔴 高' : item.priority === 'medium' ? '🟡 中' : '🟢 低'}
+                                  </td>
+                                  <td style={{ textAlign: 'center' }}>{remStatus}</td>
+                                </tr>
+                              );
+                            })}
                           </tbody>
                         </table>
-                      </>
-                    )}
-
-                    {(baby.allergies || baby.notes || health.warnings.length > 0 || stats.cryings?.length > 0) && (
-                      <div style={{
-                        marginTop: 10,
-                        padding: 10,
-                        background: health.warnings.length > 0 ? '#fff7f6' : '#fafafa',
-                        borderRadius: 6,
-                        fontSize: 12
-                      }}>
-                        <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                          {baby.allergies && <div><strong>⚠️ 过敏史：</strong>{baby.allergies}</div>}
-                          {health.warnings.length > 0 && <div><strong>🔍 关注：</strong>{health.warnings.join('、')}</div>}
-                          {stats.cryings?.length > 0 && <div><strong>😭 哭闹：</strong>{stats.cryings.length}次，累计{formatDuration(stats.totalCryingMin)}</div>}
-                          {baby.notes && <div><strong>📝 备注：</strong>{baby.notes}</div>}
-                        </Space>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
 
-              <div style={{
-                marginTop: 24,
-                padding: 12,
-                background: '#fafafa',
-                borderRadius: 8,
-                fontSize: 11,
-                color: '#999',
-                textAlign: 'center'
-              }}>
-                本报告由【母婴护理站管理系统】自动生成 · {formatDateTime(new Date().toISOString())}
+                {shiftSummary.attentionItems.length > 0 && (
+                  <div className="report-section">
+                    <div className="report-section-title">🔍 重点关注汇总</div>
+                    {shiftSummary.attentionBabies.map((babyId) => {
+                      const baby = babies.find(b => b.id === babyId);
+                      const items = shiftSummary.attentionItems.filter(i => i.babyId === babyId);
+                      return (
+                        <div key={babyId} style={{
+                          marginBottom: 10,
+                          padding: 12,
+                          background: '#fff7f6',
+                          borderRadius: 8,
+                          border: '1px solid #ffccc7'
+                        }}>
+                          <div style={{
+                            fontWeight: 600,
+                            color: '#d4380d',
+                            marginBottom: 6,
+                            fontSize: 13
+                          }}>
+                            👶 {baby?.name}
+                            {baby?.roomNumber && <span style={{ color: '#666', fontWeight: 400, marginLeft: 8, fontSize: 12 }}>
+                              {baby.roomNumber}室{baby.bedNumber}床
+                            </span>}
+                          </div>
+                          {baby?.allergies && (
+                            <div style={{ fontSize: 12, color: '#d4380d', marginBottom: 4 }}>
+                              ⚠️ 过敏史：{baby.allergies}
+                            </div>
+                          )}
+                          {items.map((it, idx) => {
+                            const rem = shiftSummary.itemReminderMap.get(it.id);
+                            return (
+                              <div key={idx} style={{ fontSize: 12, margin: '4px 0', paddingLeft: 12 }}>
+                                • {it.description}
+                                {rem && (
+                                  <span style={{
+                                    marginLeft: 8,
+                                    fontSize: 11,
+                                    color: rem.status === 'completed' ? '#52c41a' : '#1890ff'
+                                  }}>
+                                    [{rem.status === 'completed' ? `✅ 提醒已完成 @${rem.assignedTo || ''}` :
+                                      `🔔 提醒处理中 @${rem.assignedTo || ''}`}]
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {baby?.notes && (
+                            <div style={{ fontSize: 12, color: '#873800', marginTop: 4 }}>
+                              📝 备注：{baby.notes}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div style={{
+                  marginTop: 24,
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr 1fr',
+                  gap: 16,
+                  padding: 16,
+                  background: '#fafafa',
+                  borderRadius: 8
+                }}>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ marginBottom: 24, color: '#666', fontSize: 12 }}>交班人签字</div>
+                    <div style={{ borderTop: '1px solid #999', paddingTop: 8, fontSize: 12 }}>日期：</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ marginBottom: 24, color: '#666', fontSize: 12 }}>接班人签字</div>
+                    <div style={{ borderTop: '1px solid #999', paddingTop: 8, fontSize: 12 }}>日期：</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ marginBottom: 24, color: '#666', fontSize: 12 }}>护士长签字</div>
+                    <div style={{ borderTop: '1px solid #999', paddingTop: 8, fontSize: 12 }}>日期：</div>
+                  </div>
+                </div>
+
+                <div style={{
+                  marginTop: 24,
+                  padding: 12,
+                  background: '#fafafa',
+                  borderRadius: 8,
+                  fontSize: 11,
+                  color: '#999',
+                  textAlign: 'center'
+                }}>
+                  本报告由【母婴护理站管理系统】自动生成 · {formatDateTime(new Date().toISOString())}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="print-container">
+                <div className="report-header">
+                  <div className="report-title">🏥 月子中心 宝宝护理日报单</div>
+                  <div className="report-subtitle">
+                    护理日期：{dayjs(reportDate).format('YYYY年MM月DD日 dddd')}
+                    <span style={{ margin: '0 8px' }}>|</span>
+                    制表时间：{dayjs().format('YYYY-MM-DD HH:mm')}
+                    <span style={{ margin: '0 8px' }}>|</span>
+                    制表人：{currentNurse}
+                  </div>
+                  <div className="report-subtitle" style={{ color: '#666', fontSize: 11 }}>
+                    📋 筛选条件：{filterSummary}
+                  </div>
+                </div>
+
+                <div className="report-section">
+                  <div className="report-section-title">📊 今日护理总览</div>
+                  <table className="report-table">
+                    <thead>
+                      <tr>
+                        <th>在住宝宝</th><th>总喂养次数</th><th>总奶量(ml)</th>
+                        <th>亲喂时长</th><th>尿片</th><th>总睡眠</th>
+                        <th>体温记录</th><th>体重记录</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td style={{ textAlign: 'center', fontWeight: 600 }}>{filteredBabies.length} 位</td>
+                        <td style={{ textAlign: 'center' }}>{totalStats.totalFeedings} 次</td>
+                        <td style={{ textAlign: 'center' }}>{totalStats.totalMilk || '-'}</td>
+                        <td style={{ textAlign: 'center' }}>{formatDuration(totalStats.totalBreastMin)}</td>
+                        <td style={{ textAlign: 'center' }}>💧{totalStats.totalWet} / 💩{totalStats.totalStool}</td>
+                        <td style={{ textAlign: 'center' }}>{formatDuration(totalStats.totalSleepMin)}</td>
+                        <td style={{ textAlign: 'center' }}>{totalStats.tempCount} 次</td>
+                        <td style={{ textAlign: 'center' }}>{totalStats.weightCount} 次</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {filteredBabies.map(baby => {
+                  const stats = allStats.get(baby.id!);
+                  if (!stats) return null;
+                  const health = getBabyHealthTag(stats);
+                  return (
+                    <div key={baby.id} className="report-section" style={{ pageBreakInside: 'avoid' }}>
+                      <div className="report-section-title">
+                        👶 {baby.name}
+                        <Tag style={{ marginLeft: 8 }}>{baby.gender === 'male' ? '男' : '女'}</Tag>
+                        <span style={{ fontSize: 13, color: '#666', marginLeft: 8, fontWeight: 400 }}>
+                          {baby.roomNumber}室{baby.bedNumber}床 · 妈妈:{baby.motherName} · {calculateAgeDays(baby.birthDate)}天
+                        </span>
+                        <span style={{
+                          float: 'right',
+                          fontSize: 13,
+                          fontWeight: 500,
+                          color: health.color === 'green' ? '#52c41a' : health.color
+                        }}>
+                          {health.label}
+                        </span>
+                      </div>
+                      <Row gutter={[8, 8]} style={{ marginBottom: 8 }}>
+                        <Col span={6}>
+                          <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
+                            <div style={{ color: '#888' }}>🍼 喂养</div>
+                            <div style={{ fontWeight: 600 }}>
+                              {stats.feedingCount}次{stats.totalBottle ? ` · ${stats.totalBottle}ml` : ''}
+                            </div>
+                          </div>
+                        </Col>
+                        <Col span={6}>
+                          <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
+                            <div style={{ color: '#888' }}>🧷 尿/便</div>
+                            <div style={{ fontWeight: 600 }}>💧{stats.wetCount} / 💩{stats.stoolCount}</div>
+                          </div>
+                        </Col>
+                        <Col span={6}>
+                          <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
+                            <div style={{ color: '#888' }}>😴 睡眠</div>
+                            <div style={{ fontWeight: 600 }}>{formatDuration(stats.totalSleepMin)}</div>
+                          </div>
+                        </Col>
+                        <Col span={6}>
+                          <div style={{ padding: 8, background: '#f5f5f5', borderRadius: 4, fontSize: 12 }}>
+                            <div style={{ color: '#888' }}>🌡️ 体温</div>
+                            <div style={{ fontWeight: 600 }}>{stats.avgTemp ? `${stats.avgTemp.toFixed(1)}°C` : '-'}</div>
+                          </div>
+                        </Col>
+                      </Row>
+
+                      {stats.feedings?.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 13, fontWeight: 600, margin: '8px 0 6px' }}>🍼 喂养明细</div>
+                          <table className="report-table">
+                            <thead>
+                              <tr>
+                                <th style={{ width: 90 }}>时间</th>
+                                <th>方式</th>
+                                <th style={{ width: 90 }}>奶量/时长</th>
+                                <th style={{ width: 60 }}>拍嗝</th>
+                                <th style={{ width: 60 }}>吐奶</th>
+                                <th>护理人</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {stats.feedings.map((f: any) => (
+                                <tr key={f.id}>
+                                  <td>{formatTime(f.startTime)}</td>
+                                  <td>{getFeedingTypeLabel(f.type)}</td>
+                                  <td>{f.amount ? `${f.amount}ml` : `${(f.leftDuration||0)+(f.rightDuration||0)}分`}</td>
+                                  <td style={{ textAlign: 'center' }}>{f.burped ? '✅' : '❌'}</td>
+                                  <td style={{ textAlign: 'center' }}>{f.spitUp ? '⚠️' : '-'}</td>
+                                  <td>{f.caregiver}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </>
+                      )}
+
+                      {(baby.allergies || baby.notes || health.warnings.length > 0 || stats.cryings?.length > 0) && (
+                        <div style={{
+                          marginTop: 10,
+                          padding: 10,
+                          background: health.warnings.length > 0 ? '#fff7f6' : '#fafafa',
+                          borderRadius: 6,
+                          fontSize: 12
+                        }}>
+                          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                            {baby.allergies && <div><strong>⚠️ 过敏史：</strong>{baby.allergies}</div>}
+                            {health.warnings.length > 0 && <div><strong>🔍 关注：</strong>{health.warnings.join('、')}</div>}
+                            {stats.cryings?.length > 0 && <div><strong>😭 哭闹：</strong>{stats.cryings.length}次，累计{formatDuration(stats.totalCryingMin)}</div>}
+                            {baby.notes && <div><strong>📝 备注：</strong>{baby.notes}</div>}
+                          </Space>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <div style={{
+                  marginTop: 24,
+                  padding: 12,
+                  background: '#fafafa',
+                  borderRadius: 8,
+                  fontSize: 11,
+                  color: '#999',
+                  textAlign: 'center'
+                }}>
+                  本报告由【母婴护理站管理系统】自动生成 · {formatDateTime(new Date().toISOString())}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </Modal>

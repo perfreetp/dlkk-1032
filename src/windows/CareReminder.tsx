@@ -1,16 +1,17 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Card, Row, Col, Table, Button, Tag, Space, Modal, Form, Input, Select,
   DatePicker, Checkbox, Empty, Badge, Divider, List, Avatar, Tooltip,
-  Progress, Dropdown, InputNumber, message, App
+  Progress, Dropdown, InputNumber, message, App, Segmented
 } from 'antd';
 import {
   BellOutlined, PlusOutlined, CheckOutlined, ClockCircleOutlined,
   DeleteOutlined, ExclamationOutlined, ThunderboltOutlined,
-  UserOutlined, SettingOutlined, CloseOutlined, ReloadOutlined
+  UserOutlined, SettingOutlined, CloseOutlined, ReloadOutlined,
+  TeamOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useLiveQuery } from '../hooks/useLiveQuery';
+import { useLiveQuery, triggerRefresh } from '../hooks/useLiveQuery';
 import { db } from '../db';
 import { Baby, Reminder, ReminderType, ReminderStatus } from '../types';
 import { useAppStore } from '../store/appStore';
@@ -28,7 +29,10 @@ const TYPE_OPTIONS: { value: ReminderType; label: string; icon: string; color: s
 ];
 
 const CareReminder: React.FC = () => {
-  const { currentNurse, setSelectedBaby, setActiveWindow, addNotification } = useAppStore();
+  const {
+    currentNurse, setSelectedBaby, setActiveWindow, addNotification,
+    reminderJumpId, reminderJumpBabyId, setReminderJump
+  } = useAppStore();
   const { modal } = App.useApp();
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -39,12 +43,37 @@ const CareReminder: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [filterType, setFilterType] = useState<string>('all');
   const [filterRoom, setFilterRoom] = useState<string>('all');
+  const [filterBaby, setFilterBaby] = useState<number | 'all'>('all');
   const [now, setNow] = useState(new Date());
+  const [highlightId, setHighlightId] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const highlightTimeoutRef = useRef<any>(null);
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 30000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (reminderJumpBabyId || reminderJumpId) {
+      triggerRefresh();
+    }
+    if (reminderJumpBabyId && reminderJumpBabyId !== filterBaby) {
+      setFilterBaby(reminderJumpBabyId);
+    }
+    if (reminderJumpId) {
+      setHighlightId(reminderJumpId);
+      if (highlightTimeoutRef.current) clearTimeout(highlightTimeoutRef.current);
+      highlightTimeoutRef.current = setTimeout(() => {
+        const el = document.querySelector(`[data-reminder-id="${reminderJumpId}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        setTimeout(() => setHighlightId(null), 3500);
+      }, 200);
+      setReminderJump(null, null);
+    }
+  }, [reminderJumpId, reminderJumpBabyId]);
 
   const babies = useLiveQuery(
     () => db.babies.where('status').equals('active').sortBy('roomNumber'),
@@ -159,14 +188,14 @@ const CareReminder: React.FC = () => {
           title: values.title,
           scheduledTime: scheduled.toISOString(),
           status: 'pending' as ReminderStatus,
-          repeat: 'none',
+          repeat: 'none' as const,
           assignedTo: currentNurse,
           notes: values.notes,
           createdAt: now
         };
       });
 
-      await db.reminders.bulkAdd(dataList);
+      await db.reminders.bulkAdd(dataList as any);
       addNotification(`批量创建 ${dataList.length} 条提醒成功`, 'success');
       setBatchModalOpen(false);
     } catch (err: any) {
@@ -237,11 +266,12 @@ const CareReminder: React.FC = () => {
     return reminders.filter(r => {
       if (filterStatus !== 'all' && r.status !== filterStatus) return false;
       if (filterType !== 'all' && r.type !== filterType) return false;
+      if (filterBaby !== 'all' && r.babyId !== filterBaby) return false;
       const baby = babies.find(b => b.id === r.babyId);
       if (filterRoom !== 'all' && baby?.roomNumber !== filterRoom) return false;
       return true;
     });
-  }, [reminders, filterStatus, filterType, filterRoom, babies]);
+  }, [reminders, filterStatus, filterType, filterRoom, filterBaby, babies]);
 
   const upcomingReminders = filteredReminders.filter(
     r => r.status === 'pending' && dayjs(r.scheduledTime).isAfter(dayjs())
@@ -495,6 +525,33 @@ const CareReminder: React.FC = () => {
             <Option value="all">全部房间</Option>
             {rooms.map(r => <Option key={r} value={r}>{r}室</Option>)}
           </Select>
+          <Select
+            value={filterBaby}
+            onChange={(v) => setFilterBaby(v as any)}
+            style={{ width: 180 }}
+            showSearch
+            allowClear
+            placeholder="选择宝宝"
+            optionFilterProp="label"
+          >
+            <Option value="all" label="全部宝宝">全部宝宝</Option>
+            {babies.map(b => (
+              <Option key={b.id} value={b.id} label={`${b.name} ${b.roomNumber}${b.bedNumber}`}>
+                <Space>
+                  <Avatar size="small" style={{
+                    background: b.gender === 'male'
+                      ? 'linear-gradient(135deg, #69b1ff, #1677ff)'
+                      : 'linear-gradient(135deg, #ffb7d5, #ff5c7a)',
+                    fontSize: 10
+                  }}>
+                    {b.name.charAt(0)}
+                  </Avatar>
+                  <span>{b.name}</span>
+                  <Tag color="default" style={{ margin: 0 }}>{b.roomNumber}{b.bedNumber}</Tag>
+                </Space>
+              </Option>
+            ))}
+          </Select>
         </Space>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={autoUpdateMissed}>刷新</Button>
@@ -550,6 +607,8 @@ const CareReminder: React.FC = () => {
               scroll={{ x: 1100 }}
               style={{ marginBottom: 24, background: '#fff7f6', borderRadius: 8 }}
               showHeader={false}
+              rowClassName={(r) => (r.id === highlightId ? 'highlight-reminder-row' : '')}
+              onRow={(r) => ({ 'data-reminder-id': r.id } as any)}
             />
           </>
         )}
@@ -570,6 +629,8 @@ const CareReminder: React.FC = () => {
             showTotal: t => `共 ${t} 条提醒`
           }}
           scroll={{ x: 1100 }}
+          rowClassName={(r) => (r.id === highlightId ? 'highlight-reminder-row' : '')}
+          onRow={(r) => ({ 'data-reminder-id': r.id } as any)}
         />
       </div>
 

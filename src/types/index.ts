@@ -157,6 +157,7 @@ export interface HandoverItem {
   description: string;
   status: HandoverItemStatus;
   priority: 'low' | 'medium' | 'high';
+  toReminder?: boolean;
 }
 
 export interface ShiftRecord {

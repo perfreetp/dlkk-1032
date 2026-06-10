@@ -44,6 +44,10 @@ interface AppState {
 
   showTimelineBabySelector: boolean;
   setShowTimelineBabySelector: (show: boolean) => void;
+
+  reminderJumpId: number | null;
+  reminderJumpBabyId: number | null;
+  setReminderJump: (id: number | null, babyId?: number | null) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -103,7 +107,14 @@ export const useAppStore = create<AppState>((set) => ({
     })),
 
   showTimelineBabySelector: false,
-  setShowTimelineBabySelector: (show) => set({ showTimelineBabySelector: show })
+  setShowTimelineBabySelector: (show) => set({ showTimelineBabySelector: show }),
+
+  reminderJumpId: null,
+  reminderJumpBabyId: null,
+  setReminderJump: (id, babyId = null) => set({
+    reminderJumpId: id,
+    reminderJumpBabyId: babyId
+  })
 }));
 
 export type { WindowKey };

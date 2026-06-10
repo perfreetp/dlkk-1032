@@ -42,7 +42,8 @@ const ShiftRecordPage: React.FC = () => {
   const {
     currentNurse, setCurrentNurse, pendingHandoverItems,
     addHandoverItem, removeHandoverItem, updateHandoverItem,
-    clearHandoverItems, addNotification, setSelectedBaby, setActiveWindow
+    clearHandoverItems, addNotification, setSelectedBaby, setActiveWindow,
+    setReminderJump
   } = useAppStore();
   const { modal } = App.useApp();
 
@@ -305,6 +306,7 @@ const ShiftRecordPage: React.FC = () => {
           setCurrentNurse(oncomingNurse.trim());
           setOncomingNurse('');
           setNotes('');
+          setActiveTab('history');
           setHistoryTab('followup');
           triggerRefresh();
         }
@@ -745,9 +747,10 @@ const ShiftRecordPage: React.FC = () => {
       });
     };
 
-    const goToReminder = (rem: Reminder) => {
-      setActiveWindow('reminders');
-      addNotification('已跳转到护理提醒窗口', 'success');
+    const goToReminder = (rem: Reminder, babyId?: number) => {
+      setReminderJump(Number(rem.id), babyId || null);
+      setActiveWindow('careReminder');
+      addNotification('已跳转到护理提醒，已自动定位到对应提醒条', 'success');
     };
 
     if (flatHandoverItems.length === 0) {
@@ -1183,8 +1186,9 @@ const ShiftRecordPage: React.FC = () => {
                   f => f.item.id === item.id && f.relatedReminder
                 )?.relatedReminder;
                 if (reminder) {
-                  setActiveWindow('reminders');
-                  addNotification('已跳转到护理提醒窗口', 'success');
+                  setReminderJump(Number(reminder.id), reminder.babyId);
+                  setActiveWindow('careReminder');
+                  addNotification('已跳转到护理提醒，已自动定位到对应提醒条', 'success');
                 } else {
                   Modal.confirm({
                     title: '转为跟进提醒?',

@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
   Row, Col, Card, Tag, Space, Button, Select, Empty, DatePicker,
-  Divider, Drawer, Statistic, Progress, Dropdown, Badge, Avatar, Tooltip, List
+  Divider, Drawer, Statistic, Progress, Dropdown, Badge, Avatar, Tooltip, List,
+  Segmented
 } from 'antd';
 import {
   LeftOutlined, RightOutlined, CalendarOutlined,
@@ -38,7 +39,8 @@ const EVENT_FILTERS: { key: TimelineEventType | 'all'; label: string; icon: stri
 const BabyTimeline: React.FC = () => {
   const {
     selectedBaby, setSelectedBaby, selectedDate, setSelectedDate,
-    setActiveWindow, timelineFilter, setTimelineFilter
+    setActiveWindow, timelineFilter, setTimelineFilter,
+    setReminderJump
   } = useAppStore();
 
   const [events, setEvents] = useState<any[]>([]);
@@ -46,6 +48,7 @@ const BabyTimeline: React.FC = () => {
   const [eventFilter, setEventFilter] = useState<string>('all');
   const [stats, setStats] = useState<any>(null);
   const [feedingStats, setFeedingStats] = useState<any>(null);
+  const [handoverTab, setHandoverTab] = useState<'attention' | 'pending' | 'closed'>('attention');
 
   const babies = useLiveQuery(
     () => db.babies.where('status').equals('active').toArray(),
@@ -326,6 +329,66 @@ const BabyTimeline: React.FC = () => {
                 </Space>
               </Space>
               <Space>
+                <Segmented
+                  value={handoverTab}
+                  onChange={(v: any) => setHandoverTab(v as any)}
+                  options={[
+                    {
+                      label: (
+                        <span>
+                          <WarningOutlined style={{ color: '#ff4d4f' }} />
+                          {' '}重点关注{' '}
+                          {babyHandoverInfo.attention > 0 && (
+                            <Tag color="red" style={{ marginLeft: 4, fontSize: 10, padding: '0 6px', lineHeight: '16px' }}>
+                              {babyHandoverInfo.attention}
+                            </Tag>
+                          )}
+                        </span>
+                      ),
+                      value: 'attention'
+                    },
+                    {
+                      label: (
+                        <span>
+                          <ClockCircleOutlined style={{ color: '#fa8c16' }} />
+                          {' '}待处理{' '}
+                          {babyHandoverInfo.pending > 0 && (
+                            <Tag color="orange" style={{ marginLeft: 4, fontSize: 10, padding: '0 6px', lineHeight: '16px' }}>
+                              {babyHandoverInfo.pending}
+                            </Tag>
+                          )}
+                        </span>
+                      ),
+                      value: 'pending'
+                    },
+                    {
+                      label: (
+                        <span>
+                          <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                          {' '}已闭环{' '}
+                          {babyHandoverInfo.completed > 0 && (
+                            <Tag color="green" style={{ marginLeft: 4, fontSize: 10, padding: '0 6px', lineHeight: '16px' }}>
+                              {babyHandoverInfo.completed}
+                            </Tag>
+                          )}
+                        </span>
+                      ),
+                      value: 'closed'
+                    }
+                  ]}
+                  size="small"
+                />
+              </Space>
+            </div>
+
+            <div style={{
+              display: 'flex',
+              justifyContent: 'flex-end',
+              marginBottom: 10,
+              paddingBottom: 8,
+              borderBottom: '1px dashed #f0f0f0'
+            }}>
+              <Space size="small">
                 <Button
                   type="link"
                   size="small"
@@ -338,116 +401,160 @@ const BabyTimeline: React.FC = () => {
                   type="link"
                   size="small"
                   icon={<BellOutlined />}
-                  onClick={() => setActiveWindow('reminders')}
+                  onClick={() => {
+                    setReminderJump(null, selectedBaby?.id || null);
+                    setActiveWindow('careReminder');
+                  }}
                 >
-                  查看提醒
+                  查看相关提醒
                 </Button>
               </Space>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-              {babyHandoverInfo.items.slice(0, 4).map((item: any) => {
-                const statusColor =
-                  item.status === 'completed' ? 'green' :
-                    item.status === 'attention' ? 'red' :
-                      item.status === 'in_progress' ? 'blue' : 'orange';
-                const statusLabel =
-                  item.status === 'completed' ? '已完成' :
-                    item.status === 'attention' ? '重点关注' :
-                      item.status === 'in_progress' ? '处理中' : '待处理';
-                const SHIFT_LABELS: any = {
-                  morning: { icon: '🌅', label: '早班', color: '#faad14' },
-                  afternoon: { icon: '🌇', label: '中班', color: '#eb2f96' },
-                  night: { icon: '🌙', label: '夜班', color: '#722ed1' }
-                };
-                const sLabel = SHIFT_LABELS[item.shift.shiftType] || { icon: '📅', label: '交班', color: '#1890ff' };
+            {(() => {
+              const filteredItems = babyHandoverInfo.items.filter((item: any) => {
+                if (handoverTab === 'attention') return item.status === 'attention';
+                if (handoverTab === 'pending') {
+                  return item.status === 'pending' || item.status === 'in_progress' ||
+                    (item.reminder && item.reminder.status !== 'completed' && item.reminder.status !== 'cancelled');
+                }
+                if (handoverTab === 'closed') {
+                  return item.status === 'completed' ||
+                    (item.reminder && item.reminder.status === 'completed');
+                }
+                return true;
+              });
 
+              if (filteredItems.length === 0) {
                 return (
-                  <div
-                    key={item.id}
-                    style={{
-                      padding: 10,
-                      borderRadius: 8,
-                      background: '#fafafa',
-                      border: `1px solid ${sLabel.color}30`,
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
-                    onClick={() => setActiveWindow('shiftRecord')}
-                    onMouseOver={(e) => (e.currentTarget.style.background = '#fff5f7')}
-                    onMouseOut={(e) => (e.currentTarget.style.background = '#fafafa')}
-                  >
-                    <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: 4
-                    }}>
-                      <Space size="small">
-                        <span style={{ fontSize: 12, color: sLabel.color, fontWeight: 600 }}>
-                          {sLabel.icon} {sLabel.label}
-                        </span>
-                        <span style={{ fontSize: 11, color: '#999' }}>
-                          {item.shift.outgoingNurse}→{item.shift.oncomingNurse}
-                        </span>
-                      </Space>
-                      <Space size={2}>
-                        <Tag color={statusColor} style={{ fontSize: 11, margin: 0, padding: '0 6px' }}>
-                          {statusLabel}
-                        </Tag>
-                        <Tag
-                          color={item.priority === 'high' ? 'red' : item.priority === 'medium' ? 'orange' : 'default'}
-                          style={{ fontSize: 11, margin: 0, padding: '0 6px' }}>
-                          {item.priority === 'high' ? '高优' : item.priority === 'medium' ? '中优' : '低优'}
-                        </Tag>
-                      </Space>
-                    </div>
-                    <div style={{
-                      fontSize: 13,
-                      color: '#333',
-                      fontWeight: 500,
-                      lineHeight: 1.5
-                    }}>
-                      {item.description}
-                    </div>
-                    {item.reminder && (
-                      <div style={{
-                        marginTop: 6,
-                        paddingTop: 6,
-                        borderTop: '1px dashed #eee',
-                        fontSize: 12,
-                        color: item.reminder.status === 'completed' ? '#52c41a' : '#1890ff',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center'
-                      }}>
-                        <span onClick={(e) => { e.stopPropagation(); setActiveWindow('reminders'); }}>
-                          {item.reminder.status === 'completed' ? '✅' : '🔔'}
-                          {' '}{item.reminder.status === 'completed' ? '已完成提醒' : '待跟进提醒'}
-                          {item.reminder.assignedTo && ` @${item.reminder.assignedTo}`}
-                        </span>
-                        <ArrowRightOutlined style={{ fontSize: 10 }} />
-                      </div>
-                    )}
-                  </div>
+                  <Empty
+                    description={
+                      handoverTab === 'attention' ? '暂无重点关注事项' :
+                        handoverTab === 'pending' ? '暂无待处理事项' : '暂无已闭环事项'
+                    }
+                    style={{ padding: '16px 0' }}
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  />
                 );
-              })}
-            </div>
+              }
 
-            {babyHandoverInfo.items.length > 4 && (
-              <div style={{
-                marginTop: 8, textAlign: 'center',
-                paddingTop: 8, borderTop: '1px dashed #eee'
-              }}>
-                <Button
-                  type="link"
-                  size="small"
-                  onClick={() => setActiveWindow('shiftRecord')}
-                >
-                  还有 {babyHandoverInfo.items.length - 4} 项 → 查看完整交班记录
-                </Button>
-              </div>
-            )}
+              return (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    {filteredItems.slice(0, 6).map((item: any) => {
+                      const statusColor =
+                        item.status === 'completed' ? 'green' :
+                          item.status === 'attention' ? 'red' :
+                            item.status === 'in_progress' ? 'blue' : 'orange';
+                      const statusLabel =
+                        item.status === 'completed' ? '已完成' :
+                          item.status === 'attention' ? '重点关注' :
+                            item.status === 'in_progress' ? '处理中' : '待处理';
+                      const SHIFT_LABELS: any = {
+                        morning: { icon: '🌅', label: '早班', color: '#faad14' },
+                        afternoon: { icon: '🌇', label: '中班', color: '#eb2f96' },
+                        night: { icon: '🌙', label: '夜班', color: '#722ed1' }
+                      };
+                      const sLabel = SHIFT_LABELS[item.shift.shiftType] || { icon: '📅', label: '交班', color: '#1890ff' };
+
+                      return (
+                        <div
+                          key={item.id}
+                          style={{
+                            padding: 10,
+                            borderRadius: 8,
+                            background: '#fafafa',
+                            border: `1px solid ${sLabel.color}30`,
+                            cursor: 'pointer',
+                            transition: 'all 0.2s'
+                          }}
+                          onClick={() => setActiveWindow('shiftRecord')}
+                          onMouseOver={(e) => (e.currentTarget.style.background = '#fff5f7')}
+                          onMouseOut={(e) => (e.currentTarget.style.background = '#fafafa')}
+                        >
+                          <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            marginBottom: 4
+                          }}>
+                            <Space size="small">
+                              <span style={{ fontSize: 12, color: sLabel.color, fontWeight: 600 }}>
+                                {sLabel.icon} {sLabel.label}
+                              </span>
+                              <span style={{ fontSize: 11, color: '#999' }}>
+                                {item.shift.outgoingNurse}→{item.shift.oncomingNurse}
+                              </span>
+                            </Space>
+                            <Space size={2}>
+                              <Tag color={statusColor} style={{ fontSize: 11, margin: 0, padding: '0 6px' }}>
+                                {statusLabel}
+                              </Tag>
+                              <Tag
+                                color={item.priority === 'high' ? 'red' : item.priority === 'medium' ? 'orange' : 'default'}
+                                style={{ fontSize: 11, margin: 0, padding: '0 6px' }}>
+                                {item.priority === 'high' ? '高优' : item.priority === 'medium' ? '中优' : '低优'}
+                              </Tag>
+                            </Space>
+                          </div>
+                          <div style={{
+                            fontSize: 13,
+                            color: '#333',
+                            fontWeight: 500,
+                            lineHeight: 1.5
+                          }}>
+                            {item.description}
+                          </div>
+                          {item.reminder && (
+                            <div style={{
+                              marginTop: 6,
+                              paddingTop: 6,
+                              borderTop: '1px dashed #eee',
+                              fontSize: 12,
+                              color: item.reminder.status === 'completed' ? '#52c41a' : '#1890ff',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center'
+                            }}>
+                              <span onClick={(e) => {
+                                e.stopPropagation();
+                                setReminderJump(
+                                  item.reminder?.id ? Number(item.reminder.id) : null,
+                                  selectedBaby?.id || null
+                                );
+                                setActiveWindow('careReminder');
+                              }}
+                                style={{ cursor: 'pointer', textDecoration: 'underline' }}
+                              >
+                                {item.reminder.status === 'completed' ? '✅' : '🔔'}
+                                {' '}{item.reminder.status === 'completed' ? '已完成提醒' : '待跟进提醒'}
+                                {item.reminder.assignedTo && ` @${item.reminder.assignedTo}`}
+                              </span>
+                              <ArrowRightOutlined style={{ fontSize: 10 }} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {filteredItems.length > 6 && (
+                    <div style={{
+                      marginTop: 8, textAlign: 'center',
+                      paddingTop: 8, borderTop: '1px dashed #eee'
+                    }}>
+                      <Button
+                        type="link"
+                        size="small"
+                        onClick={() => setActiveWindow('shiftRecord')}
+                      >
+                        还有 {filteredItems.length - 6} 项 → 查看完整交班记录
+                      </Button>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </Card>
         </div>
       )}
