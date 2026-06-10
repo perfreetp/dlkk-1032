@@ -1,16 +1,18 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
   Row, Col, Card, Tag, Space, Button, Select, Empty, DatePicker,
-  Divider, Drawer, Statistic, Progress, Dropdown, Badge, Avatar, Tooltip
+  Divider, Drawer, Statistic, Progress, Dropdown, Badge, Avatar, Tooltip, List
 } from 'antd';
 import {
   LeftOutlined, RightOutlined, CalendarOutlined,
-  FilterOutlined, ArrowLeftOutlined, PrinterOutlined
+  FilterOutlined, ArrowLeftOutlined, PrinterOutlined,
+  TeamOutlined, BellOutlined, WarningOutlined, ArrowRightOutlined,
+  EyeOutlined, CheckCircleOutlined, ClockCircleOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useLiveQuery } from '../hooks/useLiveQuery';
+import { useLiveQuery, triggerRefresh } from '../hooks/useLiveQuery';
 import { db } from '../db';
-import { Baby, TimelineEventType, FeedingRecord } from '../types';
+import { Baby, TimelineEventType, FeedingRecord, ShiftRecord, Reminder } from '../types';
 import { useAppStore } from '../store/appStore';
 import {
   getTimelineEvents, formatDateTime, formatTime, formatDuration,
@@ -49,6 +51,60 @@ const BabyTimeline: React.FC = () => {
     () => db.babies.where('status').equals('active').toArray(),
     [], []
   ) as Baby[];
+
+  const shiftRecords = useLiveQuery(
+    async () => {
+      const arr = await db.shiftRecords.toArray();
+      arr.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return arr;
+    },
+    [], []
+  ) as ShiftRecord[];
+
+  const allReminders = useLiveQuery(
+    () => db.reminders.orderBy('createdAt').reverse().limit(300).toArray(),
+    [], []
+  ) as Reminder[];
+
+  const babyHandoverInfo = useMemo(() => {
+    if (!selectedBaby?.id) return null;
+    const todays = shiftRecords.filter(s => s.shiftDate === selectedDate);
+    const babyItems: any[] = [];
+    const relatedShifts = new Map<number, ShiftRecord>();
+
+    for (const s of todays) {
+      for (const item of s.handoverItems) {
+        if (item.babyId === selectedBaby.id) {
+          const reminder = allReminders.find(
+            r => r.handoverId === s.id &&
+              (r.handoverItemId === item.id || r.notes?.includes(item.description.slice(0, 15)))
+          );
+          babyItems.push({
+            ...item,
+            shift: s,
+            reminder
+          });
+          relatedShifts.set(s.id!, s);
+        }
+      }
+    }
+
+    if (babyItems.length === 0) return null;
+
+    const attention = babyItems.filter(i => i.status === 'attention').length;
+    const pending = babyItems.filter(i => i.status === 'pending' || i.status === 'in_progress').length;
+    const completed = babyItems.filter(i => i.status === 'completed').length;
+    const toReminders = babyItems.filter(i => i.reminder).length;
+    const resolvedReminders = babyItems.filter(i => i.reminder?.status === 'completed').length;
+
+    return {
+      items: babyItems,
+      shifts: Array.from(relatedShifts.values()),
+      total: babyItems.length,
+      attention, pending, completed,
+      toReminders, resolvedReminders
+    };
+  }, [shiftRecords, allReminders, selectedBaby?.id, selectedDate]);
 
   useEffect(() => {
     if (selectedBaby?.id) {
@@ -224,6 +280,177 @@ const BabyTimeline: React.FC = () => {
           </Col>
         </Row>
       </div>
+
+      {babyHandoverInfo && (
+        <div style={{
+          padding: '12px 20px',
+          borderBottom: '1px solid #f0f0f0',
+          background: 'linear-gradient(135deg, #fff1f0 0%, #fff7e6 50%, #f9f0ff 100%)'
+        }}>
+          <Card
+            size="small"
+            style={{
+              borderRadius: 12,
+              border: '2px solid #ffccc7',
+              background: '#fff',
+              boxShadow: '0 4px 12px rgba(255,77,79,0.06)'
+            }}
+            styles={{ body: { padding: 14 } }}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 10
+            }}>
+              <Space>
+                <Tag color="red" style={{ fontSize: 13, fontWeight: 600, padding: '2px 10px' }}>
+                  <TeamOutlined /> 今日交班关注（{babyHandoverInfo.shifts.length}次交接，共{babyHandoverInfo.total}项）
+                </Tag>
+                <Space size={4}>
+                  {babyHandoverInfo.attention > 0 && (
+                    <Tag color="red" style={{ margin: 0 }}>
+                      <WarningOutlined /> {babyHandoverInfo.attention}重点
+                    </Tag>
+                  )}
+                  {babyHandoverInfo.pending > 0 && (
+                    <Tag color="orange" style={{ margin: 0 }}>
+                      <ClockCircleOutlined /> {babyHandoverInfo.pending}待处理
+                    </Tag>
+                  )}
+                  {babyHandoverInfo.toReminders > 0 && (
+                    <Tag color="blue" style={{ margin: 0 }}>
+                      <BellOutlined /> {babyHandoverInfo.resolvedReminders}/{babyHandoverInfo.toReminders}已闭环
+                    </Tag>
+                  )}
+                </Space>
+              </Space>
+              <Space>
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<EyeOutlined />}
+                  onClick={() => setActiveWindow('shiftRecord')}
+                >
+                  查看交班历史
+                </Button>
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<BellOutlined />}
+                  onClick={() => setActiveWindow('reminders')}
+                >
+                  查看提醒
+                </Button>
+              </Space>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {babyHandoverInfo.items.slice(0, 4).map((item: any) => {
+                const statusColor =
+                  item.status === 'completed' ? 'green' :
+                    item.status === 'attention' ? 'red' :
+                      item.status === 'in_progress' ? 'blue' : 'orange';
+                const statusLabel =
+                  item.status === 'completed' ? '已完成' :
+                    item.status === 'attention' ? '重点关注' :
+                      item.status === 'in_progress' ? '处理中' : '待处理';
+                const SHIFT_LABELS: any = {
+                  morning: { icon: '🌅', label: '早班', color: '#faad14' },
+                  afternoon: { icon: '🌇', label: '中班', color: '#eb2f96' },
+                  night: { icon: '🌙', label: '夜班', color: '#722ed1' }
+                };
+                const sLabel = SHIFT_LABELS[item.shift.shiftType] || { icon: '📅', label: '交班', color: '#1890ff' };
+
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      padding: 10,
+                      borderRadius: 8,
+                      background: '#fafafa',
+                      border: `1px solid ${sLabel.color}30`,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                    onClick={() => setActiveWindow('shiftRecord')}
+                    onMouseOver={(e) => (e.currentTarget.style.background = '#fff5f7')}
+                    onMouseOut={(e) => (e.currentTarget.style.background = '#fafafa')}
+                  >
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: 4
+                    }}>
+                      <Space size="small">
+                        <span style={{ fontSize: 12, color: sLabel.color, fontWeight: 600 }}>
+                          {sLabel.icon} {sLabel.label}
+                        </span>
+                        <span style={{ fontSize: 11, color: '#999' }}>
+                          {item.shift.outgoingNurse}→{item.shift.oncomingNurse}
+                        </span>
+                      </Space>
+                      <Space size={2}>
+                        <Tag color={statusColor} style={{ fontSize: 11, margin: 0, padding: '0 6px' }}>
+                          {statusLabel}
+                        </Tag>
+                        <Tag
+                          color={item.priority === 'high' ? 'red' : item.priority === 'medium' ? 'orange' : 'default'}
+                          style={{ fontSize: 11, margin: 0, padding: '0 6px' }}>
+                          {item.priority === 'high' ? '高优' : item.priority === 'medium' ? '中优' : '低优'}
+                        </Tag>
+                      </Space>
+                    </div>
+                    <div style={{
+                      fontSize: 13,
+                      color: '#333',
+                      fontWeight: 500,
+                      lineHeight: 1.5
+                    }}>
+                      {item.description}
+                    </div>
+                    {item.reminder && (
+                      <div style={{
+                        marginTop: 6,
+                        paddingTop: 6,
+                        borderTop: '1px dashed #eee',
+                        fontSize: 12,
+                        color: item.reminder.status === 'completed' ? '#52c41a' : '#1890ff',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}>
+                        <span onClick={(e) => { e.stopPropagation(); setActiveWindow('reminders'); }}>
+                          {item.reminder.status === 'completed' ? '✅' : '🔔'}
+                          {' '}{item.reminder.status === 'completed' ? '已完成提醒' : '待跟进提醒'}
+                          {item.reminder.assignedTo && ` @${item.reminder.assignedTo}`}
+                        </span>
+                        <ArrowRightOutlined style={{ fontSize: 10 }} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {babyHandoverInfo.items.length > 4 && (
+              <div style={{
+                marginTop: 8, textAlign: 'center',
+                paddingTop: 8, borderTop: '1px dashed #eee'
+              }}>
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={() => setActiveWindow('shiftRecord')}
+                >
+                  还有 {babyHandoverInfo.items.length - 4} 项 → 查看完整交班记录
+                </Button>
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
 
       {stats && (
         <div style={{ padding: '16px 20px', borderBottom: '1px solid #f0f0f0', background: '#fafafa' }}>

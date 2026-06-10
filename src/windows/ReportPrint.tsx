@@ -1,20 +1,22 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Card, Row, Col, Table, Button, Tag, Space, Select, DatePicker,
   Empty, Statistic, Avatar, Divider, Tabs, List, Tooltip, Checkbox,
-  message, App, Progress, Radio, Modal, Dropdown
+  message, App, Progress, Radio, Modal, Dropdown, Badge
 } from 'antd';
 import {
   PrinterOutlined, DownloadOutlined, FileTextOutlined,
   FilterOutlined, CalendarOutlined, UserOutlined,
-  CheckCircleOutlined, ExportOutlined, EyeOutlined
+  CheckCircleOutlined, ExportOutlined, EyeOutlined,
+  WarningOutlined, BellOutlined, ClockCircleOutlined,
+  CloseCircleOutlined, TeamOutlined, HomeOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { useLiveQuery } from '../hooks/useLiveQuery';
+import { useLiveQuery, triggerRefresh } from '../hooks/useLiveQuery';
 import { db } from '../db';
-import { Baby } from '../types';
+import { Baby, ShiftRecord, Reminder } from '../types';
 import { useAppStore } from '../store/appStore';
 import {
   calculateAgeDays, formatDateTime, formatDuration,
@@ -32,7 +34,8 @@ const ReportPrint: React.FC = () => {
   const [reportDate, setReportDate] = useState(dayjs().format('YYYY-MM-DD'));
   const [filterRoom, setFilterRoom] = useState<string>('all');
   const [filterBaby, setFilterBaby] = useState<number | 'all'>('all');
-  const [reportType, setReportType] = useState<'daily' | 'summary'>('daily');
+  const [reportType, setReportType] = useState<'daily' | 'summary' | 'shift'>('daily');
+  const [shiftFilter, setShiftFilter] = useState<'all' | 'morning' | 'afternoon' | 'night'>('all');
   const [selectedBabies, setSelectedBabies] = useState<number[]>([]);
   const [generating, setGenerating] = useState(false);
   const [previewVisible, setPreviewVisible] = useState(false);
@@ -41,6 +44,27 @@ const ReportPrint: React.FC = () => {
     () => db.babies.where('status').equals('active').sortBy('roomNumber'),
     [], []
   ) as Baby[];
+
+  const shiftRecords = useLiveQuery(
+    async () => {
+      const arr = await db.shiftRecords.toArray();
+      arr.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      return arr;
+    },
+    [], []
+  ) as ShiftRecord[];
+
+  const allReminders = useLiveQuery(
+    () => db.reminders.orderBy('createdAt').reverse().limit(500).toArray(),
+    [], []
+  ) as Reminder[];
+
+  const SHIFT_OPTIONS: any[] = [
+    { value: 'all', label: '全部班次', icon: '📅', color: '#1890ff' },
+    { value: 'morning', label: '早班 (08:00-16:00)', icon: '🌅', color: '#faad14' },
+    { value: 'afternoon', label: '中班 (16:00-24:00)', icon: '🌇', color: '#eb2f96' },
+    { value: 'night', label: '夜班 (00:00-08:00)', icon: '🌙', color: '#722ed1' }
+  ];
 
   const rooms = useMemo(() => Array.from(new Set(babies.map(b => b.roomNumber))).sort(), [babies]);
 
@@ -333,6 +357,13 @@ const ReportPrint: React.FC = () => {
   ];
 
   const filterSummary = useMemo(() => {
+    if (reportType === 'shift') {
+      const s = SHIFT_OPTIONS.find(x => x.value === shiftFilter);
+      const tags: string[] = [reportDate];
+      if (shiftFilter !== 'all') tags.push(`${s?.icon || ''}${s?.label.split(' ')[0] || ''}`);
+      tags.push(`共${filteredShiftRecords.length}次交接`);
+      return tags.join(' · ');
+    }
     const tags: string[] = [];
     if (filterRoom !== 'all') tags.push(`房间:${filterRoom}室`);
     if (filterBaby !== 'all') {
@@ -341,9 +372,356 @@ const ReportPrint: React.FC = () => {
     }
     tags.push(`共${filteredBabies.length}位宝宝`);
     return tags.join(' · ');
-  }, [filterRoom, filterBaby, filteredBabies, babies]);
+  }, [filterRoom, filterBaby, filteredBabies, babies, reportType, reportDate, shiftFilter, filteredShiftRecords]);
+
+  const filteredShiftRecords = useMemo(() => {
+    return shiftRecords.filter(s => {
+      if (s.shiftDate !== reportDate) return false;
+      if (shiftFilter !== 'all' && s.shiftType !== shiftFilter) return false;
+      return true;
+    });
+  }, [shiftRecords, reportDate, shiftFilter]);
+
+  const shiftSummary = useMemo(() => {
+    let totalItems = 0;
+    let attention = 0;
+    let pending = 0;
+    let completed = 0;
+    let toReminders = 0;
+    let resolvedReminders = 0;
+    const allergyBabies = new Set<number>();
+    const specialNoteBabies = new Set<number>();
+    const babyItems: Record<number, any[]> = {};
+
+    for (const s of filteredShiftRecords) {
+      for (const item of s.handoverItems) {
+        totalItems++;
+        const baby = babies.find(b => b.id === item.babyId);
+        if (!babyItems[item.babyId]) babyItems[item.babyId] = [];
+        babyItems[item.babyId].push({ item, shift: s, baby });
+
+        if (item.status === 'attention') attention++;
+        else if (item.status === 'completed') completed++;
+        else pending++;
+
+        if (baby?.allergies) allergyBabies.add(baby.id!);
+        if (baby?.notes) specialNoteBabies.add(baby.id!);
+
+        const hasReminder = allReminders.find(
+          r => r.handoverId === s.id &&
+            (r.handoverItemId === item.id || r.notes?.includes(item.description.slice(0, 20)))
+        );
+        if (hasReminder) {
+          toReminders++;
+          if (hasReminder.status === 'completed') resolvedReminders++;
+        }
+      }
+    }
+
+    return {
+      totalItems, attention, pending, completed, toReminders, resolvedReminders,
+      allergyCount: allergyBabies.size,
+      specialNoteCount: specialNoteBabies.size,
+      babyItems,
+      totalShifts: filteredShiftRecords.length
+    };
+  }, [filteredShiftRecords, babies, allReminders]);
 
   const renderReportContent = () => {
+    if (reportType === 'shift') {
+      const filtered = filteredShiftRecords;
+      const summ = shiftSummary;
+
+      return (
+        <div
+          id="print-root"
+          style={{
+            position: previewVisible ? 'static' : 'fixed',
+            left: previewVisible ? 'auto' : '-10000px',
+            top: 0,
+            width: previewVisible ? '100%' : '210mm',
+            background: '#fff',
+            padding: previewVisible ? 0 : '20mm',
+            zIndex: -1
+          }}
+        >
+          <div className="print-container" style={{ minHeight: previewVisible ? 'auto' : '260mm' }}>
+            <div className="report-header">
+              <div className="report-title">🏥 月子中心 班次交接摘要</div>
+              <div className="report-subtitle">
+                交接日期：{dayjs(reportDate).format('YYYY年MM月DD日 dddd')}
+                <span style={{ margin: '0 8px' }}>|</span>
+                班次：{shiftFilter === 'all' ? '全部班次' : SHIFT_OPTIONS.find(s => s.value === shiftFilter)?.label}
+                <span style={{ margin: '0 8px' }}>|</span>
+                制表时间：{dayjs().format('YYYY-MM-DD HH:mm')}
+                <span style={{ margin: '0 8px' }}>|</span>
+                制表人：{currentNurse}
+              </div>
+              <div className="report-subtitle" style={{ color: '#666', fontSize: 11 }}>
+                📋 筛选条件：{filterSummary}
+              </div>
+            </div>
+
+            <div className="report-section">
+              <div className="report-section-title">📊 交接总览</div>
+              <table className="report-table">
+                <thead>
+                  <tr>
+                    <th>交接班次</th>
+                    <th>交班事项</th>
+                    <th>重点关注</th>
+                    <th>已完成</th>
+                    <th>待处理</th>
+                    <th>已转提醒</th>
+                    <th>提醒已闭环</th>
+                    <th>涉及过敏</th>
+                    <th>特殊备注</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ textAlign: 'center', fontWeight: 600 }}>{summ.totalShifts} 次</td>
+                    <td style={{ textAlign: 'center' }}>{summ.totalItems} 项</td>
+                    <td style={{ textAlign: 'center', color: '#ff4d4f', fontWeight: 600 }}>{summ.attention}</td>
+                    <td style={{ textAlign: 'center', color: '#52c41a', fontWeight: 600 }}>{summ.completed}</td>
+                    <td style={{ textAlign: 'center', color: '#faad14', fontWeight: 600 }}>{summ.pending}</td>
+                    <td style={{ textAlign: 'center', color: '#1890ff' }}>{summ.toReminders}</td>
+                    <td style={{ textAlign: 'center', color: '#52c41a' }}>{summ.resolvedReminders}</td>
+                    <td style={{ textAlign: 'center', color: '#eb2f96' }}>{summ.allergyCount} 位</td>
+                    <td style={{ textAlign: 'center' }}>{summ.specialNoteCount} 位</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            {filtered.length === 0 ? (
+              <div style={{ padding: 60, textAlign: 'center', color: '#999' }}>
+                当前日期和班次筛选下暂无交接记录
+              </div>
+            ) : (
+              <>
+                <div className="report-section">
+                  <div className="report-section-title">📝 班次明细</div>
+                  {filtered.map((s: ShiftRecord) => {
+                    const sopt = SHIFT_OPTIONS.find(x => x.value === s.shiftType) || SHIFT_OPTIONS[0];
+                    return (
+                      <Card
+                        key={s.id}
+                        style={{
+                          marginBottom: 16,
+                          borderRadius: 8,
+                          border: `2px solid ${sopt.color}40`,
+                          pageBreakInside: 'avoid'
+                        }}
+                        styles={{ body: { padding: 16 } }}
+                      >
+                        <div style={{
+                          padding: '10px 14px',
+                          background: `${sopt.color}11`,
+                          borderRadius: 6,
+                          marginBottom: 12,
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <Space>
+                            <span style={{ fontSize: 24 }}>{sopt.icon}</span>
+                            <div>
+                              <div style={{ fontSize: 15, fontWeight: 700 }}>
+                                {sopt.label.split(' ')[0]}
+                                <Tag color={sopt.color} style={{ marginLeft: 10, fontSize: 12 }}>{s.shiftDate}</Tag>
+                              </div>
+                              <div style={{ fontSize: 12, color: '#666', marginTop: 2 }}>
+                                👩‍⚕️ <strong>{s.outgoingNurse}</strong> → 👩‍⚕️ <strong>{s.oncomingNurse}</strong>
+                                <span style={{ marginLeft: 12 }}>{formatDateTime(s.createdAt)}</span>
+                              </div>
+                            </div>
+                          </Space>
+                          <Space>
+                            <Tag color="orange">{s.handoverItems.length}项</Tag>
+                            <Tag color="red">
+                              <WarningOutlined /> {s.handoverItems.filter(i => i.status === 'attention').length}关注
+                            </Tag>
+                            <Tag color="green">
+                              <CheckCircleOutlined /> {s.handoverItems.filter(i => i.status === 'completed').length}完成
+                            </Tag>
+                          </Space>
+                        </div>
+
+                        <Timeline
+                          style={{ marginLeft: 8 }}
+                          items={s.handoverItems.map(item => {
+                            const baby = babies.find(b => b.id === item.babyId);
+                            const rem = allReminders.find(
+                              r => r.handoverId === s.id &&
+                                (r.handoverItemId === item.id || r.notes?.includes(item.description.slice(0, 15)))
+                            );
+                            const statusColor =
+                              item.status === 'completed' ? 'green' :
+                                item.status === 'attention' ? 'red' :
+                                  item.status === 'in_progress' ? 'blue' : 'orange';
+                            return {
+                              color: statusColor as any,
+                              dot: <span style={{ fontSize: 13 }}>
+                                {item.status === 'attention' ? '❗' : item.status === 'completed' ? '✅' : '⏳'}
+                              </span>,
+                              children: (
+                                <div style={{ fontSize: 13 }}>
+                                  <div style={{ fontWeight: 500 }}>
+                                    {baby && <Tag color="purple" style={{ marginRight: 8, fontSize: 11 }}>{baby.name} {baby.roomNumber}{baby.bedNumber}</Tag>}
+                                    {item.description}
+                                  </div>
+                                  <div style={{ marginTop: 4 }}>
+                                    <Tag color={statusColor} style={{ fontSize: 11, margin: 0 }}>
+                                      {item.status === 'completed' ? '已完成' : item.status === 'attention' ? '重点关注' : item.status === 'in_progress' ? '处理中' : '待处理'}
+                                    </Tag>
+                                    <Tag
+                                      color={item.priority === 'high' ? 'red' : item.priority === 'medium' ? 'orange' : 'default'}
+                                      style={{ fontSize: 11, marginLeft: 6 }}>
+                                      {item.priority === 'high' ? '高优' : item.priority === 'medium' ? '中优' : '低优'}
+                                    </Tag>
+                                    {rem && (
+                                      <Tag color={rem.status === 'completed' ? 'green' : 'blue'} style={{ fontSize: 11, marginLeft: 6 }}>
+                                        <BellOutlined /> 已转提醒
+                                        {rem.status === 'completed' ? '✅闭环' : '⏳跟进中'}
+                                        {rem.assignedTo ? ` @${rem.assignedTo}` : ''}
+                                      </Tag>
+                                    )}
+                                  </div>
+                                </div>
+                              )
+                            };
+                          })}
+                        />
+
+                        {s.notes && (
+                          <div style={{
+                            marginTop: 8, padding: 10, background: '#fafafa',
+                            borderRadius: 6, fontSize: 12, color: '#666'
+                          }}>
+                            <strong>📝 交班备注:</strong> {s.notes}
+                          </div>
+                        )}
+                      </Card>
+                    );
+                  })}
+                </div>
+
+                <div className="report-section">
+                  <div className="report-section-title">⚠️ 重点关注汇总</div>
+                  <Card styles={{ body: { padding: 12 } }} style={{ borderRadius: 8 }}>
+                    <List
+                      size="small"
+                      locale={{ emptyText: '暂无重点关注事项' }}
+                      dataSource={Object.entries(summ.babyItems)
+                        .filter(([_, items]) => items.some(i =>
+                          i.item.status === 'attention' || i.item.status === 'pending' ||
+                          i.baby?.allergies || i.baby?.notes
+                        ))
+                        .map(([bid, items]) => {
+                          const id = Number(bid);
+                          const baby = babies.find(b => b.id === id);
+                          return (
+                            <List.Item key={id} style={{ padding: '10px 0', borderBottom: '1px dashed #eee' }}>
+                              <Row align="middle" style={{ width: '100%' }}>
+                                <Col span={3}>
+                                  <Avatar size="small" style={{
+                                    background: baby?.gender === 'male' ? '#1890ff' : '#ff85a2'
+                                  }}>
+                                    {baby?.name.charAt(0)}
+                                  </Avatar>
+                                  <Tag color="purple" style={{ marginTop: 4, fontSize: 11 }}>{baby?.name}</Tag>
+                                </Col>
+                                <Col span={3} style={{ fontSize: 12, color: '#666' }}>
+                                  {baby ? `${baby.roomNumber}室${baby.bedNumber}床` : '-'}
+                                </Col>
+                                <Col span={18}>
+                                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                                    {baby?.allergies && (
+                                      <div style={{ fontSize: 12 }}>
+                                        <Tag color="red" style={{ fontSize: 11 }}>过敏</Tag>
+                                        {baby.allergies}
+                                      </div>
+                                    )}
+                                    {baby?.notes && (
+                                      <div style={{ fontSize: 12 }}>
+                                        <Tag color="orange" style={{ fontSize: 11 }}>特殊</Tag>
+                                        {baby.notes}
+                                      </div>
+                                    )}
+                                    {items
+                                      .filter(i => i.item.status === 'attention' || i.item.status === 'pending')
+                                      .slice(0, 5)
+                                      .map((i, idx) => {
+                                        const rem = allReminders.find(
+                                          r => r.handoverId === i.shift.id &&
+                                            (r.handoverItemId === i.item.id || r.notes?.includes(i.item.description.slice(0, 15)))
+                                        );
+                                        return (
+                                          <div key={idx} style={{ fontSize: 12 }}>
+                                            <Tag color={
+                                              i.item.status === 'attention' ? 'red' : 'orange'
+                                            } style={{ fontSize: 11 }}>
+                                              {i.item.status === 'attention' ? '关注' : '待办'}
+                                            </Tag>
+                                            {i.item.description}
+                                            {rem && (
+                                              <Tag color={rem.status === 'completed' ? 'green' : 'blue'} style={{ fontSize: 11 }}>
+                                                提醒{rem.status === 'completed' ? '✅' : '⏳'}
+                                              </Tag>
+                                            )}
+                                          </div>
+                                        );
+                                      })
+                                    }
+                                  </Space>
+                                </Col>
+                              </Row>
+                            </List.Item>
+                          );
+                        })}
+                    />
+                  </Card>
+                </div>
+
+                {summ.attention + summ.pending > 0 && (
+                  <div className="report-section">
+                    <div className="report-section-title">✅ 交班人 / 接班人 签字</div>
+                    <table className="report-table">
+                      <thead>
+                        <tr>
+                          <th>交班人签字</th>
+                          <th>接班人签字</th>
+                          <th>签字日期</th>
+                          <th>护士长审核</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td style={{ height: 48, textAlign: 'center', color: '#999' }}>____________________</td>
+                          <td style={{ height: 48, textAlign: 'center', color: '#999' }}>____________________</td>
+                          <td style={{ height: 48, textAlign: 'center', color: '#999' }}>____________________</td>
+                          <td style={{ height: 48, textAlign: 'center', color: '#999' }}>____________________</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <div style={{
+                  marginTop: 24, padding: 16,
+                  background: '#fafafa', borderRadius: 8,
+                  fontSize: 12, color: '#999', textAlign: 'center'
+                }}>
+                  本交接摘要由【母婴护理站管理系统】自动生成 · 生成时间 {formatDateTime(new Date().toISOString())} · 共 {filtered.length} 次交接 {summ.totalItems} 项事项
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     const babiesToRender = filteredBabies;
     return (
       <div
@@ -640,6 +1018,9 @@ const ReportPrint: React.FC = () => {
                 <Radio.Button value="summary" style={{ padding: '6px 20px', fontWeight: 600 }}>
                   <EyeOutlined /> 汇总统计表
                 </Radio.Button>
+                <Radio.Button value="shift" style={{ padding: '6px 20px', fontWeight: 600 }}>
+                  <TeamOutlined /> 交班摘要
+                </Radio.Button>
               </Radio.Group>
             </Space>
           </Col>
@@ -653,43 +1034,60 @@ const ReportPrint: React.FC = () => {
                   style={{ width: 180 }}
                 />
               </Space>
-              <Select
-                placeholder="筛选房间"
-                value={filterRoom}
-                onChange={setFilterRoom}
-                style={{ width: 130 }}
-                allowClear
-              >
-                <Option value="all">全部房间</Option>
-                {rooms.map(r => <Option key={r} value={r}>{r}室</Option>)}
-              </Select>
-              <Select
-                placeholder="选择宝宝"
-                value={filterBaby}
-                onChange={setFilterBaby}
-                style={{ width: 160 }}
-                allowClear
-                showSearch
-                optionFilterProp="label"
-              >
-                <Option value="all" label="全部宝宝">全部宝宝</Option>
-                {babies.map(b => (
-                  <Option key={b.id} value={b.id} label={`${b.name} ${b.roomNumber}${b.bedNumber}`}>
-                    <Space>
-                      <Avatar size="small" style={{
-                        background: b.gender === 'male'
-                          ? 'linear-gradient(135deg, #69b1ff, #1677ff)'
-                          : 'linear-gradient(135deg, #ffb7d5, #ff5c7a)',
-                        fontSize: 10
-                      }}>
-                        {b.name.charAt(0)}
-                      </Avatar>
-                      <span>{b.name}</span>
-                      <Tag color="default" style={{ margin: 0 }}>{b.roomNumber}{b.bedNumber}</Tag>
-                    </Space>
-                  </Option>
-                ))}
-              </Select>
+              {reportType !== 'shift' ? (
+                <>
+                  <Select
+                    placeholder="筛选房间"
+                    value={filterRoom}
+                    onChange={setFilterRoom}
+                    style={{ width: 130 }}
+                    allowClear
+                  >
+                    <Option value="all">全部房间</Option>
+                    {rooms.map(r => <Option key={r} value={r}>{r}室</Option>)}
+                  </Select>
+                  <Select
+                    placeholder="选择宝宝"
+                    value={filterBaby}
+                    onChange={setFilterBaby}
+                    style={{ width: 160 }}
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                  >
+                    <Option value="all" label="全部宝宝">全部宝宝</Option>
+                    {babies.map(b => (
+                      <Option key={b.id} value={b.id} label={`${b.name} ${b.roomNumber}${b.bedNumber}`}>
+                        <Space>
+                          <Avatar size="small" style={{
+                            background: b.gender === 'male'
+                              ? 'linear-gradient(135deg, #69b1ff, #1677ff)'
+                              : 'linear-gradient(135deg, #ffb7d5, #ff5c7a)',
+                            fontSize: 10
+                          }}>
+                            {b.name.charAt(0)}
+                          </Avatar>
+                          <span>{b.name}</span>
+                          <Tag color="default" style={{ margin: 0 }}>{b.roomNumber}{b.bedNumber}</Tag>
+                        </Space>
+                      </Option>
+                    ))}
+                  </Select>
+                </>
+              ) : (
+                <Segmented
+                  value={shiftFilter}
+                  onChange={(v) => setShiftFilter(v as any)}
+                  options={SHIFT_OPTIONS.map(s => ({
+                    label: (
+                      <span style={{ fontWeight: 500 }}>
+                        {s.icon} {s.label.split(' ')[0]}
+                      </span>
+                    ),
+                    value: s.value
+                  }))}
+                />
+              )}
             </Space>
           </Col>
           <Col>
@@ -782,15 +1180,30 @@ const ReportPrint: React.FC = () => {
         gap: 24,
         flexWrap: 'wrap'
       }}>
-        <Statistic title="📅 报告日期" value={reportDate} valueStyle={{ fontSize: 16 }} />
-        <Statistic title="👶 包含宝宝" value={filteredBabies.length} suffix="位" valueStyle={{ fontSize: 16, color: '#1677ff' }} />
-        <Statistic title="🍼 总喂养" value={totalStats.totalFeedings} suffix="次" valueStyle={{ fontSize: 16, color: '#722ed1' }} />
-        <Statistic title="🥛 总奶量" value={totalStats.totalMilk} suffix="ml" valueStyle={{ fontSize: 16, color: '#52c41a' }} />
-        <Statistic title="🧷 尿布更换" value={`${totalStats.totalWet + totalStats.totalStool}`} suffix="次" valueStyle={{ fontSize: 16, color: '#faad14' }} />
+        {reportType === 'shift' ? (
+          <>
+            <Statistic title="📅 交接日期" value={reportDate} valueStyle={{ fontSize: 16 }} />
+            <Statistic title="🔄 交接班次" value={shiftSummary.totalShifts} suffix="次" valueStyle={{ fontSize: 16, color: '#722ed1' }} />
+            <Statistic title="📝 交班事项" value={shiftSummary.totalItems} suffix="项" valueStyle={{ fontSize: 16, color: '#1677ff' }} />
+            <Statistic title="❗ 重点关注" value={shiftSummary.attention} valueStyle={{ fontSize: 16, color: '#ff4d4f' }} />
+            <Statistic title="⏳ 待处理" value={shiftSummary.pending} valueStyle={{ fontSize: 16, color: '#faad14' }} />
+            <Statistic title="✅ 已转提醒" value={shiftSummary.toReminders} valueStyle={{ fontSize: 16, color: '#52c41a' }} />
+          </>
+        ) : (
+          <>
+            <Statistic title="📅 报告日期" value={reportDate} valueStyle={{ fontSize: 16 }} />
+            <Statistic title="👶 包含宝宝" value={filteredBabies.length} suffix="位" valueStyle={{ fontSize: 16, color: '#1677ff' }} />
+            <Statistic title="🍼 总喂养" value={totalStats.totalFeedings} suffix="次" valueStyle={{ fontSize: 16, color: '#722ed1' }} />
+            <Statistic title="🥛 总奶量" value={totalStats.totalMilk} suffix="ml" valueStyle={{ fontSize: 16, color: '#52c41a' }} />
+            <Statistic title="🧷 尿布更换" value={`${totalStats.totalWet + totalStats.totalStool}`} suffix="次" valueStyle={{ fontSize: 16, color: '#faad14' }} />
+          </>
+        )}
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
-        {filteredBabies.length === 0 ? (
+        {reportType === 'shift' ? (
+          renderReportContent()
+        ) : filteredBabies.length === 0 ? (
           <Empty description="没有符合条件的宝宝数据" style={{ padding: 60 }} />
         ) : reportType === 'summary' ? (
           <Card title="📊 护理数据汇总表" style={{ borderRadius: 12 }}>

@@ -143,6 +143,8 @@ export interface Reminder {
   completedAt?: string;
   assignedTo?: string;
   notes?: string;
+  handoverId?: number;
+  handoverItemId?: string;
   createdAt: string;
 }
 
